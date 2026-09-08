@@ -3,5 +3,8 @@ node_modules
 out/
 src/
 resources/
+media/chart.mjs
+eslint.config.mjs
+.prettierrc
 .gitignore
 tsconfig.json
