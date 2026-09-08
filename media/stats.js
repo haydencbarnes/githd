@@ -292,6 +292,34 @@
           }
         },
         plugins: {
+          legend: {
+            labels: {
+              generateLabels(chart) {
+                const labels = Chart.defaults.plugins.legend.labels.generateLabels(chart);
+                const style = getComputedStyle(document.documentElement);
+                for (const label of labels) {
+                  if (chart.data.datasets[label.datasetIndex].label === 'Commits') {
+                    label.fillStyle = style.getPropertyValue('--chart-background-color').trim();
+                  }
+                }
+                const highlightColor = style.getPropertyValue('--chart-shadow-color').trim();
+                labels.push({
+                  text: 'Visible history range',
+                  fillStyle: highlightColor,
+                  strokeStyle: highlightColor,
+                  fontColor: chart.options.plugins.legend.labels.color,
+                  lineWidth: 0,
+                  hidden: false
+                });
+                return labels;
+              }
+            },
+            onClick(event, item, legend) {
+              if (item.datasetIndex !== undefined) {
+                Chart.defaults.plugins.legend.onClick(event, item, legend);
+              }
+            }
+          },
           tooltip: {
             mode: 'index',
             intersect: false

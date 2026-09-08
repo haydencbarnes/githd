@@ -106,8 +106,8 @@ class FolderItem extends vs.TreeItem {
 
   constructor(
     context: string,
-    private _parent: FolderItem | undefined,
-    private _gitRelativePath: string,
+    readonly parent: FolderItem | undefined,
+    readonly gitRelativePath: string,
     label: string,
     description: string,
     iconPath?: { light: vs.Uri; dark: vs.Uri }
@@ -116,7 +116,7 @@ class FolderItem extends vs.TreeItem {
     this.resourceUri = vs.Uri.from({
       scheme: ExplorerViewProvider.scheme,
       authority: FolderItem.authority,
-      path: '/' + this._gitRelativePath
+      path: '/' + this.gitRelativePath
     });
     this.contextValue = context;
     if (description) {
@@ -127,8 +127,6 @@ class FolderItem extends vs.TreeItem {
     this.collapsibleState = vs.TreeItemCollapsibleState.Expanded;
   }
 
-  readonly parent = this._parent;
-  readonly gitRelativePath: string = this._gitRelativePath;
   get subFolders(): FolderItem[] {
     return this._subFolders;
   }

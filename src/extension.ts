@@ -5,6 +5,7 @@ import { GitService } from './gitService';
 import { CommandCenter } from './commands';
 import { HistoryViewProvider } from './historyViewProvider';
 import { ExplorerViewProvider } from './explorerViewProvider';
+import { CompareViewProvider } from './compareViewProvider';
 import { InfoViewProvider } from './infoViewProvider';
 import { BlameViewProvider } from './blameViewProvider';
 import { Dataloader } from './dataloader';
@@ -19,6 +20,7 @@ export function activate(context: vs.ExtensionContext) {
   let panelView = new PanelViewProvider(context, model);
   let historyViewProvider = new HistoryViewProvider(context, model, dataloader, gitService, panelView);
   let explorerViewProvider = new ExplorerViewProvider(context, model, dataloader, gitService);
+  new CompareViewProvider(context, gitService);
   new InfoViewProvider(context, model, gitService);
   new BlameViewProvider(context, model, gitService);
   new CommandCenter(context, model, dataloader, gitService, historyViewProvider, explorerViewProvider);

@@ -2,14 +2,15 @@
     "name": "githd",
     "displayName": "Git History Diff",
     "description": "View git history. View diff of committed files. View git blame info. View stash details.",
-    "version": "2.5.7",
+    "version": "3.0.0",
     "publisher": "huizhou",
     "author": {
         "name": "Hui Zhou",
         "email": "zhou_hui@outlook.com"
     },
     "engines": {
-        "vscode": "^1.91.0"
+        "vscode": "^1.105.0",
+        "node": "^22.13.0 || >=24.0.0"
     },
     "license": "MIT",
     "repository": {
@@ -32,7 +33,7 @@
     "activationEvents": [
         "*"
     ],
-    "main": "./dist/extension",
+    "main": "./dist/extension.js",
     "contributes": {
         "languages": [
             {
@@ -135,6 +136,13 @@
                 {
                     "id": "githd.files",
                     "name": "Committed Files",
+                    "icon": "media/icons/githd.svg",
+                    "when": "githd.hasGitRepo && githd.hasFilesViewContext"
+                },
+                {
+                    "id": "githd.compare",
+                    "name": "Compare",
+                    "icon": "media/icons/githd.svg",
                     "when": "githd.hasGitRepo"
                 }
             ],
@@ -143,11 +151,34 @@
                     "id": "githd.stats",
                     "type": "webview",
                     "name": "Stats",
+                    "icon": "media/icons/githd.svg",
                     "when": "githd.hasGitRepo && !githd.expressMode"
                 }
             ]
         },
         "commands": [
+            {
+                "command": "githd.selectCompareRepository",
+                "title": "Select Compare Repository",
+                "category": "GitHD"
+            },
+            {
+                "command": "githd.selectCompareBranch",
+                "title": "Select Compare Branch",
+                "category": "GitHD"
+            },
+            {
+                "command": "githd.swapCompareBranches",
+                "title": "Swap Branches",
+                "category": "GitHD",
+                "icon": "$(arrow-swap)"
+            },
+            {
+                "command": "githd.refreshCompare",
+                "title": "Refresh Comparison",
+                "category": "GitHD",
+                "icon": "$(refresh)"
+            },
             {
                 "command": "githd.inputRef",
                 "title": "Input Ref",
@@ -411,6 +442,22 @@
         "menus": {
             "commandPalette": [
                 {
+                    "command": "githd.selectCompareRepository",
+                    "when": "false"
+                },
+                {
+                    "command": "githd.selectCompareBranch",
+                    "when": "false"
+                },
+                {
+                    "command": "githd.swapCompareBranches",
+                    "when": "false"
+                },
+                {
+                    "command": "githd.refreshCompare",
+                    "when": "false"
+                },
+                {
                     "command": "githd.viewHistory",
                     "when": "githd.hasGitRepo"
                 },
@@ -539,7 +586,6 @@
                     "when": "false"
                 },
                 {
-
                     "command": "githd.refreshFilesView",
                     "when": "false"
                 },
@@ -586,6 +632,16 @@
             ],
             "view/title": [
                 {
+                    "command": "githd.swapCompareBranches",
+                    "when": "view == githd.compare && githd.hasGitRepo",
+                    "group": "navigation@1"
+                },
+                {
+                    "command": "githd.refreshCompare",
+                    "when": "view == githd.compare && githd.hasGitRepo",
+                    "group": "navigation@2"
+                },
+                {
                     "command": "githd.goBackFilesView",
                     "when": "view == githd.files && githd.hasGitRepo && githd.canGoBackFilesView",
                     "group": "navigation@1"
@@ -625,7 +681,7 @@
                     "when": "view == githd.files && githd.hasGitRepo && !githd.hasNextCommit",
                     "group": "navigation@4"
                 },
-                                {
+                {
                     "command": "githd.refreshFilesView",
                     "when": "view == githd.files && githd.hasGitRepo",
                     "group": "navigation@8"
@@ -912,34 +968,34 @@
     },
     "scripts": {
         "vscode:prepublish": "npm run build",
-        "lint": "eslint src --ext ts",
+        "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+        "lint": "eslint src --max-warnings=0",
         "typecheck": "tsc -p tsconfig.json --noEmit",
-        "bundle": "esbuild src/extension.ts --bundle --outdir=dist --external:vscode --platform=node --target=node12.18 --sourcemap",
-        "copy-chart-js": "cpy node_modules/chart.js/dist/chart.js node_modules/chartjs-adapter-date-fns/dist/chartjs-adapter-date-fns.bundle.js dist/ --flat",
-        "build": "npm run bundle && npm run copy-chart-js",
+        "bundle": "esbuild src/extension.ts --bundle --outfile=dist/extension.js --external:vscode --platform=node --format=cjs --target=node22 --sourcemap",
+        "bundle:charts": "esbuild media/chart.mjs --bundle --outfile=dist/chart.js --platform=browser --format=iife --target=chrome138 --minify",
+        "build": "npm run clean && npm run bundle && npm run bundle:charts",
         "ts-compile": "tsc -p tsconfig.json",
         "pretty": "prettier -l \"src/**/*.ts\""
     },
     "devDependencies": {
-        "@types/lodash": "^4.17.7",
-        "@types/mocha": "^10.0.7",
-        "@types/node": "22.x",
-        "@types/vscode": "^1.91.0",
-        "@typescript-eslint/eslint-plugin": "^8.4.0",
-        "@typescript-eslint/parser": "^8.4.0",
-        "@vscode/test-electron": "^2.4.1",
-        "cpy-cli": "^5.0.0",
-        "esbuild": "^0.23.1",
-        "eslint": "^9.10.0",
-        "mocha": "^10.7.3",
-        "prettier": "^3.3.3",
-        "typescript": "^5.5.4"
+        "@types/lodash": "^4.17.25",
+        "@types/mocha": "^10.0.10",
+        "@types/node": "^22.20.1",
+        "@types/vscode": "~1.105.0",
+        "@typescript-eslint/eslint-plugin": "^8.70.0",
+        "@typescript-eslint/parser": "^8.70.0",
+        "@vscode/test-electron": "^3.1.0",
+        "esbuild": "^0.28.2",
+        "eslint": "^10.10.0",
+        "mocha": "^12.0.0",
+        "prettier": "^3.9.6",
+        "typescript": "~6.0.0"
     },
     "dependencies": {
-        "chart.js": "^3.7.0",
+        "chart.js": "^4.5.1",
         "chartjs-adapter-date-fns": "^3.0.0",
-        "date-fns": "^3.6.0",
-        "lodash": "^4.17.21",
-        "lru-cache": "^11.0.1"
+        "date-fns": "^4.4.0",
+        "lodash": "^4.18.1",
+        "lru-cache": "^11.5.2"
     }
 }

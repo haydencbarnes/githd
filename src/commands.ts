@@ -2,7 +2,7 @@ import * as path from 'path';
 
 import * as vs from 'vscode';
 
-import { Model, HistoryViewContext } from './model';
+import { Model, HistoryViewContext, FilesViewContext } from './model';
 import { HistoryViewProvider } from './historyViewProvider';
 import { InfoViewProvider } from './infoViewProvider';
 import { GitService, GitRepo, GitRefType, GitCommittedFile } from './gitService';
@@ -107,7 +107,7 @@ async function selectAuthor(gitService: GitService, repo: GitRepo): Promise<vs.Q
 
 interface Command {
   id: string;
-  method: Function;
+  method: (...args: any[]) => unknown;
 }
 
 const Commands: Command[] = [];
@@ -364,14 +364,18 @@ export class CommandCenter {
   dummyForNextCommitIcon(): void {}
 
   @command('githd.openCommittedFile')
-  openCommittedFile(file: GitCommittedFile): void {
+  openCommittedFile(
+    file: GitCommittedFile,
+    context: FilesViewContext | undefined = this._model.filesViewContext,
+    comparisonTitle?: string
+  ): void {
     Tracer.verbose('Command: githd.openCommittedFile');
-    let rightRef = this._model.filesViewContext?.rightRef;
+    let rightRef = context?.rightRef;
     let leftRef: string = rightRef + '~';
-    let title = rightRef;
-    if (this._model.filesViewContext?.leftRef) {
-      leftRef = this._model.filesViewContext.leftRef;
-      title = `${leftRef} .. ${rightRef}`;
+    let title = comparisonTitle ?? rightRef;
+    if (context?.leftRef) {
+      leftRef = context.leftRef;
+      title = comparisonTitle ?? `${leftRef} .. ${rightRef}`;
     }
     title += ' | ' + path.basename(file.gitRelativePath);
     let left = file.status == 'A' ? vs.Uri.parse('githd-empty:') : toGitUri(file.oldFileUri, leftRef);

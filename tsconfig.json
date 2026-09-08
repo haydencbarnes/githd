@@ -1,12 +1,13 @@
 {
 	"compilerOptions": {
-		"module": "commonjs",
-		"target": "es2021",
+		"module": "node20",
+		"target": "es2022",
 		"outDir": "out",
         "pretty": true,
 		"lib": [
-			"es2021"
+			"es2022"
 		],
+		"types": ["node"],
 		"sourceMap": true,
 		"rootDir": ".",
 		"strict": true,   /* enable all strict type-checking options */

@@ -233,11 +233,11 @@ export class GitService {
     return parseInt(await this._exec(args, repo.root));
   }
 
-  async getRefs(repo: GitRepo): Promise<GitRef[]> {
+  async getRefs(repo: GitRepo, throwOnError = false): Promise<GitRef[]> {
     if (!repo) {
       return [];
     }
-    const result = await this._exec(['for-each-ref', '--format=%(refname) %(objectname:short)'], repo.root);
+    const result = await this._exec(['for-each-ref', '--format=%(refname) %(objectname:short)'], repo.root, throwOnError);
     const fn = (line: string): GitRef | null => {
       let match: RegExpExecArray | null;
 
@@ -269,7 +269,8 @@ export class GitService {
     repo: GitRepo,
     rightRef: string,
     leftRef?: string,
-    isStash?: boolean
+    isStash?: boolean,
+    throwOnError = false
   ): Promise<[string, GitCommittedFile[]]> {
     if (!repo) {
       return ['', []];
@@ -280,7 +281,7 @@ export class GitService {
     } else if (isStash) {
       args.unshift('stash');
     }
-    const result = await this._exec(args, repo.root);
+    const result = await this._exec(args, repo.root, throwOnError);
     let files: GitCommittedFile[] = [];
     result.split(/\r?\n/g).forEach((value, index) => {
       if (value) {
@@ -647,7 +648,7 @@ export class GitService {
     return url.replace(/:\/\/.*?\//g, '://github.com/');
   }
 
-  private async _exec(args: string[], cwd: string): Promise<string> {
+  private async _exec(args: string[], cwd: string, throwOnError = false): Promise<string> {
     const start = Date.now();
     const cmd = this._gitPath;
 
@@ -679,6 +680,9 @@ export class GitService {
       return result;
     } catch (err) {
       Tracer.error(`git command failed: ${cmd} ${args.join(' ')} (${Date.now() - start}ms) ${cwd} ${err}`);
+      if (throwOnError) {
+        throw err;
+      }
       return '';
     }
   }

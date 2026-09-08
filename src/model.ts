@@ -75,6 +75,7 @@ export class Model {
     this._config = getConfiguration();
     Tracer.level = this._config.traceLevel;
     vs.commands.executeCommand('setContext', 'githd.disableInEditor', this._config.disabledInEditor);
+    vs.commands.executeCommand('setContext', 'githd.hasFilesViewContext', false);
     this._loader.enableCache(this._config.cacheEnabled);
 
     vs.workspace.onDidChangeConfiguration(
@@ -104,6 +105,9 @@ export class Model {
     );
 
     context.subscriptions.push(
+      this._onDidChangeFilesViewContext.event(filesContext =>
+        vs.commands.executeCommand('setContext', 'githd.hasFilesViewContext', !!filesContext?.rightRef)
+      ),
       this._onDidChangeConfiguration,
       this._onDidChangeFilesViewContext,
       this._onDidChangeHistoryViewContext
@@ -132,7 +136,7 @@ export class Model {
   }
 
   setFilesViewContext(context: FilesViewContext) {
-    context.specifiedPath?.fsPath; // touch it to make the value to be progate to the getter.
+    void context.specifiedPath?.fsPath; // touch it to make the value to be progate to the getter.
 
     Tracer.info(`Model: set filesViewContext - ${JSON.stringify(context)}`);
 
@@ -202,7 +206,7 @@ export class Model {
   }
 
   async setHistoryViewContext(context: HistoryViewContext) {
-    context.specifiedPath?.fsPath; // touch it to make the value to be progate to the getter.
+    void context.specifiedPath?.fsPath; // touch it to make the value to be progate to the getter.
     if (context && !context.branch) {
       context.branch = await this._loader.getCurrentBranch(context?.repo);
     }

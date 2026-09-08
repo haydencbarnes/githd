@@ -65,6 +65,13 @@ _Press F1_ and type or select below commands to run.
 
 ### Diff Branch
 
+- Open **Compare** in the GitHD sidebar and select a **Repository**, **Base** branch, and **Compare** branch.
+- Select a changed file to open its side-by-side diff. The base is on the left and the compare branch is on the right.
+- Use **Swap Branches** to reverse the comparison or **Refresh Comparison** to reload branch tips. Local and remote-tracking branches are available without checking out either branch. Refresh uses local refs; it does not fetch from remotes.
+- The sidebar compares branch tips directly, not changes since their merge base. Committed Files keeps its own selection.
+
+The `GitHD: View Branch Diff` command also supports these options:
+
 - Select a branch or ref to compare with current branch
 - Select two branches or refs to compare with current branch. You are able to select a local branch to compare with another local or remote branch.
 - Input a SHA to compare with current branch (`F1 -> GitHD: View Branch Diff -> Enter Commit SHA -> SHA`)
@@ -83,6 +90,8 @@ click the SHA to see committed files and their changes. You could disable it in 
 
 ### Display of the Committed Files
 
+Committed Files appears after selecting a commit, stash, or comparison through the history and diff commands. Clearing the view hides it again. Compare remains available independently.
+
 ![Image of display files](https://raw.githubusercontent.com/huizhougit/githd/master/resources/display_files.gif)
 
 ### Express Mode
@@ -95,6 +104,21 @@ _Press F1_ and type or select `Preferences: Open Workspace Settings` or `Prefere
 
 ![Image of the configurations](https://raw.githubusercontent.com/huizhougit/githd/master/resources/configurations.png)
 
+## Development
+
+Use Node.js 22.13+ on the 22.x release line, or Node.js 24+. The extension requires VS Code 1.105+ or a compatible Cursor release.
+
+```sh
+npm ci
+npm run typecheck
+npm run lint
+npm run build
+```
+
+The build cleans `dist`, bundles the extension for Node.js 22 as CommonJS, and bundles Chart.js with its date-fns adapter for the stats webview. Press F5 to launch an Extension Development Host after building.
+
+TypeScript is pinned to the 6.0 release line until the stable TypeScript ESLint tooling supports 7.x. VS Code API typings stay on 1.105 to match the minimum supported editor version. Select the workspace TypeScript version when VS Code prompts.
+
 ## Changes
 
 [Change Log](https://github.com/huizhougit/githd/blob/master/CHANGELOG.md)
@@ -106,11 +130,3 @@ _Press F1_ and type or select `Preferences: Open Workspace Settings` or `Prefere
 ## Thanks
 
 **Big thanks** to all the contributors and users!
-
-## Unofficial Author's Words
-
-> This is the tool I wanted but could not find so wrote myself.
->
-> 我会说中文。
->
-> Enjoy it!

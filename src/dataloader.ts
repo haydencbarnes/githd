@@ -67,7 +67,11 @@ export class Dataloader {
     }
 
     this._cacheEnabled = enable;
-    enable ? this._enableCache() : this._disableCache();
+    if (enable) {
+      this._enableCache();
+    } else {
+      this._disableCache();
+    }
   }
 
   async getLogEntries(
