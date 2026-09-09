@@ -10,6 +10,24 @@ import { isEmptyHash } from './utils';
 const EntrySeparator = '[githd-es]';
 const FormatSeparator = '[githd-fs]';
 
+function parseGitPath(value: string): string {
+  if (!value.startsWith('"')) {
+    return value;
+  }
+  return JSON.parse(value.replace(/\\([0-7]{3}|.)/g, (escape, character: string) => {
+    if (character === 'a') {
+      return '\\u0007';
+    }
+    if (character === 'v') {
+      return '\\u000b';
+    }
+    if (/^[0-7]{3}$/.test(character)) {
+      return `\\u${parseInt(character, 8).toString(16).padStart(4, '0')}`;
+    }
+    return escape;
+  }));
+}
+
 function normalizeFilePath(fsPath: string): string {
   fsPath = path.normalize(fsPath);
   if (os.platform() == 'win32') {
@@ -82,6 +100,7 @@ export interface GitBlameItem {
   file: vs.Uri;
   line: number;
   hash: string;
+  history?: { file: vs.Uri; line: number; ref: string };
   subject?: string;
   body?: string;
   author?: string;
@@ -161,6 +180,13 @@ export class GitService {
   }
 
   async getGitRepo(fsPath: string): Promise<GitRepo | undefined> {
+    while (!fs.existsSync(fsPath)) {
+      const parent = path.dirname(fsPath);
+      if (parent === fsPath) {
+        return;
+      }
+      fsPath = parent;
+    }
     if (fs.statSync(fsPath).isFile()) {
       fsPath = path.dirname(fsPath);
     }
@@ -497,27 +523,200 @@ export class GitService {
     });
   }
 
+  getFileRevision(file: vs.Uri): { file: vs.Uri; ref?: string; useContents: boolean; stage?: number } | undefined {
+    if (file.scheme === 'file') {
+      return { file, useContents: false };
+    }
+    if (file.scheme !== 'git') {
+      return;
+    }
+    try {
+      const params = JSON.parse(file.query);
+      if (
+        !params ||
+        typeof params.path !== 'string' ||
+        (params.ref !== undefined && typeof params.ref !== 'string') ||
+        params.submoduleOf
+      ) {
+        return;
+      }
+      const ref = params.ref ?? '';
+      const stage = /^[:~]([1-3])$/.exec(ref);
+      if (stage) {
+        return { file: vs.Uri.file(params.path), useContents: true, stage: Number(stage[1]) };
+      }
+      const useContents = !ref || ref === '~' || /^[:~][0-3]$/.test(ref);
+      return { file: vs.Uri.file(params.path), ref: useContents ? undefined : ref, useContents };
+    } catch {
+      return;
+    }
+  }
+
+  private async _resolveFileRevision(file: vs.Uri): Promise<{ file: vs.Uri; ref?: string; useContents: boolean } | undefined> {
+    const source = this.getFileRevision(file);
+    if (!source?.stage) {
+      return source;
+    }
+    const repo = await this.getGitRepo(source.file.fsPath);
+    if (!repo) {
+      return;
+    }
+    const relativePath = path.relative(repo.root, source.file.fsPath).split(path.sep).join('/');
+    const blob = (await this._exec(
+      ['rev-parse', '--verify', '--quiet', `:${source.stage}:${relativePath}`], repo.root
+    )).trim();
+    if (!blob) {
+      return;
+    }
+
+    const operationRefs = ['MERGE_HEAD', 'REBASE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD'];
+    const refs = source.stage === 2 ? ['HEAD'] : operationRefs;
+    for (const ref of refs) {
+      const commit = (await this._exec(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], repo.root)).trim();
+      if (!commit) {
+        continue;
+      }
+      const useParents = ref === 'REVERT_HEAD' ? source.stage === 3 : source.stage === 1;
+      const candidates = !useParents
+        ? [commit]
+        : ref === 'MERGE_HEAD'
+          ? (await this._exec(['merge-base', '--all', 'HEAD', commit], repo.root)).trim().split(/\s+/)
+          : (await this._exec(['rev-list', '--parents', '-n', '1', commit], repo.root)).trim().split(/\s+/).slice(1);
+      const exactCandidates: string[] = [];
+      for (const candidate of candidates.filter(Boolean)) {
+        const candidateBlob = (await this._exec(
+          ['rev-parse', '--verify', '--quiet', `${candidate}:${relativePath}`], repo.root
+        )).trim();
+        if (candidateBlob === blob) {
+          exactCandidates.push(candidate);
+        }
+      }
+      if (exactCandidates.length > 0) {
+        return exactCandidates.length === 1
+          ? { file: source.file, ref: exactCandidates[0], useContents: false }
+          : undefined;
+      }
+
+      const renamedCandidates: { file: vs.Uri; ref: string }[] = [];
+      for (const candidate of candidates.filter(Boolean)) {
+        const entries = (await this._exec(['ls-tree', '-r', '--full-tree', '-z', candidate], repo.root)).split('\0');
+        const matches = entries
+          .filter(entry => entry.substring(0, entry.indexOf('\t')).split(' ')[2] === blob)
+          .map(entry => entry.substring(entry.indexOf('\t') + 1));
+        if (matches.length === 1 && candidates.length === 1) {
+          return { file: vs.Uri.file(path.join(repo.root, matches[0])), ref: candidate, useContents: false };
+        }
+        if (matches.length > 0) {
+          const renamedPaths = new Set<string>();
+          const targetRefs = source.stage === 2 ? operationRefs : ['HEAD', ref];
+          for (const targetRef of targetRefs) {
+            const target = (await this._exec(
+              ['rev-parse', '--verify', '--quiet', `${targetRef}^{commit}`], repo.root
+            )).trim();
+            if (!target) {
+              continue;
+            }
+            const targets = targetRef === 'REVERT_HEAD'
+              ? (await this._exec(['rev-list', '--parents', '-n', '1', target], repo.root)).trim().split(/\s+/).slice(1)
+              : [target];
+            for (const targetCommit of targets.filter(value => value && value !== candidate)) {
+              const renames = (await this._exec(
+                ['diff', '--name-status', '--find-renames', '--diff-filter=R', '-z', candidate, targetCommit], repo.root
+              )).split('\0');
+              for (let offset = 0; offset + 2 < renames.length; offset += 3) {
+                if (renames[offset + 2] === relativePath && matches.includes(renames[offset + 1])) {
+                  renamedPaths.add(renames[offset + 1]);
+                }
+              }
+            }
+          }
+          for (const filename of renamedPaths) {
+            renamedCandidates.push({ file: vs.Uri.file(path.join(repo.root, filename)), ref: candidate });
+          }
+        }
+      }
+      if (renamedCandidates.length > 0) {
+        return renamedCandidates.length === 1 ? { ...renamedCandidates[0], useContents: false } : undefined;
+      }
+    }
+  }
+
+  async getHistoryRevision(file: vs.Uri, line?: number): Promise<{ file: vs.Uri; ref?: string; line?: number } | undefined> {
+    const source = await this._resolveFileRevision(file);
+    if (!source) {
+      return;
+    }
+    if (!source.useContents) {
+      return { file: source.file, ref: source.ref, line };
+    }
+    if (line !== undefined) {
+      return (await this.getBlameItem(file, line))?.history;
+    }
+
+    const repo = await this.getGitRepo(source.file.fsPath);
+    if (!repo) {
+      return;
+    }
+    const ref = (await this._exec(['rev-parse', '--verify', '--quiet', 'HEAD'], repo.root)).trim();
+    if (!ref) {
+      return;
+    }
+    const renames = (await this._exec(
+      ['diff', '--cached', '--name-status', '--find-renames', '--diff-filter=R', '-z', ref],
+      repo.root
+    )).split('\0');
+    for (let offset = 0; offset + 2 < renames.length; offset += 3) {
+      if (normalizeFilePath(path.join(repo.root, renames[offset + 2])) === normalizeFilePath(source.file.fsPath)) {
+        return { file: vs.Uri.file(path.join(repo.root, renames[offset + 1])), ref };
+      }
+    }
+    return { file: source.file, ref };
+  }
+
   async getBlameItem(file: vs.Uri, line: number): Promise<GitBlameItem | undefined> {
-    const repo = await this.getGitRepo(file.fsPath);
+    const source = await this._resolveFileRevision(file);
+    if (!source) {
+      return;
+    }
+
+    const filePath = source.file.fsPath;
+    const repo = await this.getGitRepo(filePath);
     if (!repo) {
       return;
     }
 
-    const filePath = file.fsPath;
-    const result = await this._exec(
-      ['blame', `${filePath}`, '-L', `${line + 1},${line + 1}`, '--incremental', '--root'],
-      repo.root
-    );
+    const args = ['-c', 'core.quotePath=false', 'blame', '-L', `${line + 1},${line + 1}`, '--incremental', '--root'];
+    let contents: Uint8Array | undefined;
+    if (source.useContents) {
+      const document = await vs.workspace.openTextDocument(file);
+      contents = await vs.workspace.encode(document.getText(), { encoding: document.encoding });
+      if (!(await this._exec(['rev-parse', '--verify', '--quiet', 'HEAD'], repo.root)).trim()) {
+        return { file, line, hash: '0000000000000000000000000000000000000000' };
+      }
+      args.push('--contents', '-');
+    } else if (source.ref) {
+      args.push(source.ref);
+    }
+    args.push('--', filePath);
+    const result = await this._exec(args, repo.root, false, contents);
     let hash = '';
+    let originalLine = -1;
+    let originalFile: vs.Uri | undefined;
     let subject = '';
     let author = '';
     let date = '';
     let email = '';
     result.split(/\r?\n/g).forEach((line, index) => {
       if (index == 0) {
-        hash = line.split(' ')[0];
+        const fields = line.split(' ');
+        hash = fields[0];
+        originalLine = Number(fields[1]) - 1;
       } else {
         const infoName = line.split(' ')[0];
+        if (infoName === 'filename') {
+          originalFile = vs.Uri.file(path.join(repo.root, parseGitPath(line.substring(infoName.length + 1))));
+          return;
+        }
         const info = line.substring(infoName.length).trim();
         if (!info) {
           return;
@@ -553,6 +752,10 @@ export class GitService {
       return { file, line, hash };
     }
 
+    const history = originalFile && Number.isInteger(originalLine) && originalLine >= 0
+      ? { file: originalFile, line: originalLine, ref: hash }
+      : undefined;
+
     // get additional info: abbrev hash, relative date, body, stat
     const addition: string = await this._exec(
       ['show', `--format=%h${FormatSeparator}%cr${FormatSeparator}%b${FormatSeparator}`, '--stat', `${hash}`],
@@ -570,6 +773,7 @@ export class GitService {
       subject,
       body,
       hash,
+      history,
       author,
       date,
       email,
@@ -648,7 +852,7 @@ export class GitService {
     return url.replace(/:\/\/.*?\//g, '://github.com/');
   }
 
-  private async _exec(args: string[], cwd: string, throwOnError = false): Promise<string> {
+  private async _exec(args: string[], cwd: string, throwOnError = false, input?: string | Uint8Array): Promise<string> {
     const start = Date.now();
     const cmd = this._gitPath;
 
@@ -672,6 +876,10 @@ export class GitService {
             reject(stderr);
           }
         });
+        if (input !== undefined) {
+          childProcess.stdin.on('error', reject);
+          childProcess.stdin.end(input);
+        }
       });
 
       Tracer.verbose(

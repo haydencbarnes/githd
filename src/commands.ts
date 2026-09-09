@@ -159,11 +159,15 @@ export class CommandCenter {
     if (!specifiedPath) {
       return;
     }
-    let repo = await this._gitService.getGitRepo(specifiedPath.fsPath);
+    const source = await this._gitService.getHistoryRevision(specifiedPath);
+    if (!source) {
+      return;
+    }
+    let repo = await this._gitService.getGitRepo(source.file.fsPath);
     if (!repo) {
       return;
     }
-    return this._viewHistory({ specifiedPath, repo, branch: '' });
+    return this._viewHistory({ specifiedPath: source.file, repo, branch: source.ref ?? '' });
   }
 
   @command('githd.viewFolderHistory')
@@ -173,22 +177,24 @@ export class CommandCenter {
   }
 
   @command('githd.viewLineHistory')
-  async viewLineHistory(file = vs.window.activeTextEditor?.document?.uri): Promise<void> {
+  async viewLineHistory(
+    file = vs.window.activeTextEditor?.document?.uri,
+    line = vs.window.activeTextEditor?.selection?.active?.line
+  ): Promise<void> {
     Tracer.verbose('Command: githd.viewLineHistory');
-    if (!file) {
+    if (!file || line === undefined || !Number.isInteger(line) || line < 0) {
       return;
     }
 
-    let repo = await this._gitService.getGitRepo(file.fsPath);
+    const source = await this._gitService.getHistoryRevision(file, line);
+    if (!source || source.line === undefined) {
+      return;
+    }
+    let repo = await this._gitService.getGitRepo(source.file.fsPath);
     if (!repo) {
       return;
     }
-    let line = vs.window.activeTextEditor?.selection?.active?.line;
-    if (!line) {
-      return;
-    }
-    line++;
-    return this._viewHistory({ specifiedPath: file, line, repo, branch: '' });
+    return this._viewHistory({ specifiedPath: source.file, line: source.line + 1, repo, branch: source.ref ?? '' });
   }
 
   @command('githd.viewAllHistory')
