@@ -2,6 +2,9 @@ import * as vs from 'vscode';
 
 export const prHoverMessage = new vs.MarkdownString('Click to see GitHub PR');
 
+// Separates a tree item's description from the stats appended to it
+export const descriptionSeparator = '\u00a0\u2022\u00a0';
+
 export function decorateWithoutWhitespace(ranges: vs.Range[], target: string, line: number, offset: number) {
   let start = 0;
   let newWord = true;

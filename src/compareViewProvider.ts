@@ -1,11 +1,77 @@
 import * as path from 'path';
 import * as vs from 'vscode';
 
-import { GitService, GitRepo, GitRef, GitRefType } from './gitService';
+import { GitService, GitRepo, GitRef, GitRefType, GitCommittedFile } from './gitService';
+import { GitLineCounts } from './gitParser';
 import { Resource } from './resource';
+import { descriptionSeparator } from './utils';
 
 interface BranchPickItem extends vs.QuickPickItem {
   ref: GitRef;
+}
+
+function formatCounts(insertions: number, deletions: number): string {
+  return `+${insertions} -${deletions}`;
+}
+
+function formatLineCounts(counts: GitLineCounts): string {
+  return counts.binary ? 'binary' : formatCounts(counts.insertions, counts.deletions);
+}
+
+function formatLineCountsMarkdown(counts: GitLineCounts): string {
+  if (counts.binary) {
+    return 'binary';
+  }
+  return (
+    `<span style="color:var(--vscode-terminal-ansiGreen);">+${counts.insertions}</span> ` +
+    `<span style="color:var(--vscode-terminal-ansiRed);">-${counts.deletions}</span>`
+  );
+}
+
+class CompareFileItem extends vs.TreeItem {
+  private readonly _description: string;
+
+  constructor(
+    readonly file: GitCommittedFile,
+    repo: GitRepo,
+    base: GitRef,
+    compare: GitRef
+  ) {
+    super(path.basename(file.gitRelativePath));
+    const directory = path.dirname(file.gitRelativePath);
+    this._description = directory === '.' ? file.status : `${file.status} | ${directory}`;
+    const icon =
+      file.status === 'A'
+        ? 'diff-added'
+        : file.status === 'D'
+          ? 'diff-removed'
+          : file.status === 'R'
+            ? 'diff-renamed'
+            : 'diff-modified';
+    this.iconPath = new vs.ThemeIcon(icon, Resource.getGitStatusColor(file.status));
+    this.command = {
+      title: 'Open branch diff',
+      command: 'githd.openCommittedFile',
+      arguments: [file, { repo, leftRef: base.commit, rightRef: compare.commit }, `${base.name} .. ${compare.name}`]
+    };
+    this.setLineCounts(undefined);
+  }
+
+  setLineCounts(counts: GitLineCounts | undefined): void {
+    this.description = counts ? this._description + descriptionSeparator + formatLineCounts(counts) : this._description;
+    const tooltip = new vs.MarkdownString();
+    // Trusted so the colored spans render; no commands are enabled. The path is escaped by appendText.
+    tooltip.isTrusted = { enabledCommands: [] };
+    tooltip.appendText(
+      this.file.gitRelativeOldPath === this.file.gitRelativePath
+        ? this.file.gitRelativePath
+        : `${this.file.gitRelativeOldPath} -> ${this.file.gitRelativePath}`
+    );
+    if (counts) {
+      tooltip.appendMarkdown(`\n\n${formatLineCountsMarkdown(counts)}`);
+    }
+    this.tooltip = tooltip;
+  }
 }
 
 export class CompareViewProvider implements vs.TreeDataProvider<vs.TreeItem> {
@@ -16,7 +82,7 @@ export class CompareViewProvider implements vs.TreeDataProvider<vs.TreeItem> {
   private _repo: GitRepo | undefined;
   private _base: GitRef | undefined;
   private _compare: GitRef | undefined;
-  private _files: vs.TreeItem[] = [];
+  private _files: CompareFileItem[] = [];
   private _request = 0;
 
   constructor(
@@ -174,42 +240,33 @@ export class CompareViewProvider implements vs.TreeDataProvider<vs.TreeItem> {
         return;
       }
       this._view.message = 'Loading comparison...';
+      // Line counts require git to diff every file, so they are requested alongside the file list
+      // and filled in once the list is shown. A failure only leaves the counts out (getLineCounts
+      // does not throw), while a failure to list the files is reported below.
+      const lineCountsRequest = this._gitService.getLineCounts(repo, base.commit, compare.commit);
       const [, files] = await this._gitService.getCommittedFiles(repo, compare.commit, base.commit, false, true);
       if (request !== this._request) {
         return;
       }
       this._files = files
         .sort((left, right) => left.gitRelativePath.localeCompare(right.gitRelativePath))
-        .map(file => {
-          const item = new vs.TreeItem(path.basename(file.gitRelativePath));
-          const directory = path.dirname(file.gitRelativePath);
-          item.description = directory === '.' ? file.status : `${file.status} | ${directory}`;
-          item.tooltip =
-            file.gitRelativeOldPath === file.gitRelativePath
-              ? file.gitRelativePath
-              : `${file.gitRelativeOldPath} -> ${file.gitRelativePath}`;
-          const icon =
-            file.status === 'A'
-              ? 'diff-added'
-              : file.status === 'D'
-                ? 'diff-removed'
-                : file.status === 'R'
-                  ? 'diff-renamed'
-                  : 'diff-modified';
-          item.iconPath = new vs.ThemeIcon(icon, Resource.getGitStatusColor(file.status));
-          item.command = {
-            title: 'Open branch diff',
-            command: 'githd.openCommittedFile',
-            arguments: [
-              file,
-              { repo, leftRef: base.commit, rightRef: compare.commit },
-              `${base.name} .. ${compare.name}`
-            ]
-          };
-          return item;
-        });
+        .map(file => new CompareFileItem(file, repo, base, compare));
       this._view.description = `${files.length} changed file${files.length === 1 ? '' : 's'}`;
       this._view.message = files.length ? undefined : 'No differences between these branches.';
+      this._onDidChange.fire(undefined);
+
+      const lineCounts = await lineCountsRequest;
+      if (request !== this._request || !lineCounts.size) {
+        return;
+      }
+      let insertions = 0;
+      let deletions = 0;
+      lineCounts.forEach(counts => {
+        insertions += counts.insertions;
+        deletions += counts.deletions;
+      });
+      this._files.forEach(item => item.setLineCounts(lineCounts.get(item.file.gitRelativePath)));
+      this._view.description += descriptionSeparator + formatCounts(insertions, deletions);
     } catch (error) {
       if (request === this._request) {
         this._view.message = `Unable to compare branches. ${String(error).trim()}`;

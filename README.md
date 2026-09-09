@@ -67,6 +67,7 @@ _Press F1_ and type or select below commands to run.
 
 - Open **Compare** in the GitHD sidebar and select a **Repository**, **Base** branch, and **Compare** branch.
 - Select a changed file to open its side-by-side diff. The base is on the left and the compare branch is on the right.
+- Each changed file shows its added and removed line counts, with the totals in the view header. Binary files are marked `binary`.
 - Use **Swap Branches** to reverse the comparison or **Refresh Comparison** to reload branch tips. Local and remote-tracking branches are available without checking out either branch. Refresh uses local refs; it does not fetch from remotes.
 - The sidebar compares branch tips directly, not changes since their merge base. Committed Files keeps its own selection.
 
