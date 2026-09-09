@@ -6,27 +6,10 @@ import * as vs from 'vscode';
 import { execSync, spawn } from 'child_process';
 import { Tracer } from './tracer';
 import { isEmptyHash } from './utils';
+import { GitLineCounts, parseGitPath, parseNameStatus, parseNumStat } from './gitParser';
 
 const EntrySeparator = '[githd-es]';
 const FormatSeparator = '[githd-fs]';
-
-function parseGitPath(value: string): string {
-  if (!value.startsWith('"')) {
-    return value;
-  }
-  return JSON.parse(value.replace(/\\([0-7]{3}|.)/g, (escape, character: string) => {
-    if (character === 'a') {
-      return '\\u0007';
-    }
-    if (character === 'v') {
-      return '\\u000b';
-    }
-    if (/^[0-7]{3}$/.test(character)) {
-      return `\\u${parseInt(character, 8).toString(16).padStart(4, '0')}`;
-    }
-    return escape;
-  }));
-}
 
 function normalizeFilePath(fsPath: string): string {
   fsPath = path.normalize(fsPath);
@@ -301,49 +284,35 @@ export class GitService {
     if (!repo) {
       return ['', []];
     }
-    let args = ['show', '--format=%h', '--name-status', rightRef];
+    // -z keeps paths unquoted regardless of core.quotePath; the empty format and --no-show-signature
+    // keep the commit header out of the output
+    let args = ['show', '--no-show-signature', '--format=', '--name-status', '-z', rightRef];
     if (leftRef) {
-      args = ['diff', '--name-status', `${leftRef}..${rightRef}`];
+      args = ['diff', '--name-status', '-z', `${leftRef}..${rightRef}`];
     } else if (isStash) {
       args.unshift('stash');
     }
     const result = await this._exec(args, repo.root, throwOnError);
-    let files: GitCommittedFile[] = [];
-    result.split(/\r?\n/g).forEach((value, index) => {
-      if (value) {
-        let info = value.split(/\t/g);
-        if (info.length < 2) {
-          return;
-        }
-        let gitRelativePath: string;
-        let gitRelativeOldPath: string;
-        const status: string = info[0][0].toLocaleUpperCase();
-        // A    filename
-        // M    filename
-        // D    filename
-        // RXX  file_old    file_new
-        // CXX  file_old    file_new
-        switch (status) {
-          case 'M':
-          case 'A':
-          case 'D':
-          case 'T':
-            gitRelativeOldPath = info[1];
-            gitRelativePath = info[1];
-            break;
-          case 'R':
-          case 'C':
-            gitRelativeOldPath = info[1];
-            gitRelativePath = info[2];
-            break;
-          default:
-            throw new Error('Cannot parse ' + info);
-        }
-        files.push(new GitCommittedFileImpl(repo, gitRelativePath, gitRelativeOldPath, status));
-      }
-    });
+    const files: GitCommittedFile[] = parseNameStatus(result).map(
+      change => new GitCommittedFileImpl(repo, change.newPath, change.oldPath, change.status)
+    );
     const stats: string = !leftRef && !isStash ? await this._updateCommitsStats(repo, rightRef, files) : '';
     return [stats, files];
+  }
+
+  // returns [gitRelativePath, line counts] for every file changed between the two refs.
+  // Unless throwOnError is set, a failure yields an empty map.
+  async getLineCounts(
+    repo: GitRepo,
+    leftRef: string,
+    rightRef: string,
+    throwOnError = false
+  ): Promise<Map<string, GitLineCounts>> {
+    if (!repo) {
+      return new Map();
+    }
+    const result = await this._exec(['diff', '--numstat', '-z', `${leftRef}..${rightRef}`], repo.root, throwOnError);
+    return parseNumStat(result);
   }
 
   async getLogEntries(
@@ -784,13 +753,16 @@ export class GitService {
 
   // commits will be updated with stats
   private async _updateCommitsStats(repo: GitRepo, ref: string, commits: GitCommittedFile[]): Promise<string> {
-    const res: string = await this._exec(['show', '--format=', '--stat', '--stat-width=200', ref], repo.root);
+    const res: string = await this._exec(
+      ['show', '--no-show-signature', '--format=', '--stat', '--stat-width=200', ref],
+      repo.root
+    );
     const stats = new Map<string, string>(); // [oldFilePath, stat]
     let total = '';
     res.split(/\r?\n/g).forEach(line => {
       const items = line.split('|');
       if (items.length == 2) {
-        stats.set(items[0].trim(), items[1].trim()); // TODO: rename is not handled
+        stats.set(parseGitPath(items[0].trim()), items[1].trim()); // TODO: rename is not handled
       } else if (line.indexOf('changed') > 0) {
         total = line;
       }

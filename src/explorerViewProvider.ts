@@ -7,6 +7,7 @@ import { getIconUri } from './icons';
 import { Tracer } from './tracer';
 import { Resource } from './resource';
 import { Dataloader } from './dataloader';
+import { descriptionSeparator } from './utils';
 
 class InfoItem extends vs.TreeItem {
   constructor(label: string, description?: string) {
@@ -86,7 +87,7 @@ class CommittedFileItem extends vs.TreeItem {
     this._withStats = value;
     this.description = this._description;
     if (value) {
-      this.description += '\u00a0\u2022\u00a0' + this.file.stat;
+      this.description += descriptionSeparator + this.file.stat;
     }
   }
 
