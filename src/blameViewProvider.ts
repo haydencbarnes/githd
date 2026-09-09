@@ -6,11 +6,12 @@ import { Tracer } from './tracer';
 import { debounce, getPullRequests, isEmptyHash } from './utils';
 
 const NotCommitted = `Not committed yet`;
+const BlameDocumentSelector: vs.DocumentSelector = [{ scheme: 'file' }, { scheme: 'git' }];
 
 class BlameViewStatProvider implements vs.Disposable, vs.HoverProvider {
   private _disposables: vs.Disposable[] = [];
   constructor(private _owner: BlameViewProvider) {
-    this._disposables.push(vs.languages.registerHoverProvider({ scheme: 'file' }, this));
+    this._disposables.push(vs.languages.registerHoverProvider(BlameDocumentSelector, this));
   }
 
   dispose(): void {
@@ -34,7 +35,7 @@ class BlameViewStatProvider implements vs.Disposable, vs.HoverProvider {
 class BlameViewInfoProvider implements vs.Disposable, vs.HoverProvider {
   private _disposables: vs.Disposable[] = [];
   constructor(private _owner: BlameViewProvider, private _gitService: GitService) {
-    this._disposables.push(vs.languages.registerHoverProvider({ scheme: 'file' }, this));
+    this._disposables.push(vs.languages.registerHoverProvider(BlameDocumentSelector, this));
   }
 
   dispose(): void {
@@ -47,13 +48,18 @@ class BlameViewInfoProvider implements vs.Disposable, vs.HoverProvider {
     }
 
     const blame = this._owner.blame as GitBlameItem; // shouldShowHover will be false if _blame is undefined
+    const source = this._gitService.getFileRevision(blame.file);
+    if (!source) {
+      return;
+    }
     return new Promise(async resolve => {
-      const repo = await this._gitService.getGitRepo(blame.file.fsPath);
+      const repo = await this._gitService.getGitRepo(source.file.fsPath);
       const ref: string = blame.hash;
-      let args: string = encodeURIComponent(JSON.stringify([repo, ref, blame.file]));
+      let args: string = encodeURIComponent(JSON.stringify([repo, ref, source.file]));
       const commit: string = `*[${ref}](command:githd.openCommit?${args} "Click to see commit details")*`;
       args = encodeURIComponent(JSON.stringify([blame.file]));
       const file: string = `[*file*](command:githd.viewFileHistory?${args} "Click to see current file history")`;
+      args = encodeURIComponent(JSON.stringify([blame.file, blame.line]));
       const line: string = `[*line*](command:githd.viewLineHistory?${args} "Click to see current line history")`;
       let subject: string = '';
       let lastPREnd = 0;
@@ -89,6 +95,7 @@ ${blame.body}
 
 export class BlameViewProvider {
   private _blame: GitBlameItem | undefined;
+  private _updateVersion = 0;
   private _infoProvider: BlameViewInfoProvider;
   private _statProvider: BlameViewStatProvider;
   private _debouncedUpdate: (editor: vs.TextEditor) => void;
@@ -172,12 +179,12 @@ export class BlameViewProvider {
   }
 
   private async _onDidChangeSelection(editor: vs.TextEditor) {
-    if (!editor) {
-      Tracer.info('_onDidChangeSelection with null or undefined editor');
+    if (!editor || editor !== vs.window.activeTextEditor) {
+      Tracer.info('_onDidChangeSelection with inactive or missing editor');
       return;
     }
     const file = editor.document.uri;
-    if (!this._enabled || file.scheme !== 'file' || editor.document.isDirty) {
+    if (!this._enabled || !vs.languages.match(BlameDocumentSelector, editor.document) || editor.document.isDirty) {
       return;
     }
     Tracer.verbose('Blame view: onDidChangeSelection');
@@ -194,8 +201,7 @@ export class BlameViewProvider {
       Tracer.info('_onDidChangeActiveTextEditor with null or undefined editor');
       return;
     }
-    const file = editor.document.uri;
-    if (!this._enabled || file.scheme !== 'file' || editor.document.isDirty) {
+    if (!this._enabled || !vs.languages.match(BlameDocumentSelector, editor.document) || editor.document.isDirty) {
       return;
     }
     Tracer.verbose('Blame view: onDidChangeActiveTextEditor');
@@ -205,7 +211,7 @@ export class BlameViewProvider {
 
   private async _onDidChangeTextDocument(doc: vs.TextDocument) {
     const editor: vs.TextEditor | undefined = vs.window.activeTextEditor;
-    if (!this._enabled || doc.uri.scheme !== 'file' || editor?.document !== doc) {
+    if (!this._enabled || !vs.languages.match(BlameDocumentSelector, doc) || editor?.document !== doc) {
       return;
     }
 
@@ -218,35 +224,48 @@ export class BlameViewProvider {
   }
 
   private async _update(editor: vs.TextEditor): Promise<void> {
+    if (editor !== vs.window.activeTextEditor || editor.document.isDirty || !this._enabled) {
+      return;
+    }
     const file = editor.document.uri;
     const line = editor.selection.active.line;
+    const documentVersion = editor.document.version;
+    const updateVersion = ++this._updateVersion;
     Tracer.verbose(` Try to update blame. ${file.fsPath}: ${line}`);
 
-    this._blame = await this._gitService.getBlameItem(file, line);
-    if (!this._blame) {
+    const blame = await this._gitService.getBlameItem(file, line);
+    if (
+      updateVersion !== this._updateVersion ||
+      editor !== vs.window.activeTextEditor ||
+      file !== editor.document.uri ||
+      line !== editor.selection.active.line ||
+      documentVersion !== editor.document.version ||
+      editor.document.isDirty ||
+      !this._enabled
+    ) {
+      Tracer.info(`This update is outdated. ${file.fsPath}: ${line}, dirty ${editor.document.isDirty}`);
+      return;
+    }
+    this._blame = blame;
+    if (!blame) {
       return;
     }
 
     let contentText = '\u00a0\u00a0\u00a0\u00a0';
-    if (isEmptyHash(this._blame.hash)) {
+    if (isEmptyHash(blame.hash)) {
       contentText += NotCommitted;
     } else {
-      contentText += `${this._blame.author} [${this._blame.relativeDate}]\u00a0\u2022\u00a0${this._blame.subject}`;
+      contentText += `${blame.author} [${blame.relativeDate}]\u00a0\u2022\u00a0${blame.subject}`;
     }
     const options: vs.DecorationOptions = {
       range: new vs.Range(line, Number.MAX_SAFE_INTEGER, line, Number.MAX_SAFE_INTEGER),
       renderOptions: { after: { contentText } }
     };
-    if (file !== editor.document.uri || line != editor.selection.active.line || editor.document.isDirty) {
-      // git blame could take long time and the active line has changed
-      Tracer.info(`This update is outdated. ${file.fsPath}: ${line}, dirty ${editor.document.isDirty}`);
-      this._blame = undefined;
-      return;
-    }
     editor.setDecorations(this._decoration, [options]);
   }
 
   private _clear(editor: vs.TextEditor): void {
+    this._updateVersion++;
     this._blame = undefined;
     editor.setDecorations(this._decoration, []);
   }

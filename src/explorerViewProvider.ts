@@ -1,5 +1,4 @@
 import * as path from 'path';
-import * as fs from 'fs';
 import * as vs from 'vscode';
 
 import { GitService, GitCommittedFile } from './gitService';
@@ -319,8 +318,14 @@ export class ExplorerViewProvider implements vs.TreeDataProvider<CommittedTreeIt
         this._building = true;
 
         // build the tree here so that we can show the loading indicator
-        await this._build();
-        this._building = false;
+        try {
+          await this._build();
+        } catch (error) {
+          this._treeRoot = [];
+          throw error;
+        } finally {
+          this._building = false;
+        }
       }
       return this._treeRoot;
     }
@@ -517,23 +522,21 @@ export class ExplorerViewProvider implements vs.TreeDataProvider<CommittedTreeIt
       relativePath,
       this._rootFolderIcon
     );
-    if (fs.lstatSync(specifiedPath.fsPath).isFile()) {
+    const file = committedFiles.find(value =>
+      value.gitRelativePath === relativePath || value.gitRelativeOldPath === relativePath
+    );
+    if (file || lineInfo) {
       if (lineInfo) {
         folder.infoItem = new LineDiffItem(lineInfo);
       }
-      let file = committedFiles.find(value => {
-        return value.gitRelativePath === relativePath;
-      });
       if (file) {
         folder.files.push(this._createCommittedFileItem(folder, file));
       }
     } else {
-      let focus: GitCommittedFile[] = [];
-      committedFiles.forEach(file => {
-        if (relativePath && file.gitRelativePath.search(relativePath) === 0) {
-          focus.push(file);
-        }
-      });
+      const prefix = relativePath === '.' ? '' : `${relativePath}/`;
+      const focus = committedFiles.filter(value =>
+        value.gitRelativePath.startsWith(prefix) || value.gitRelativeOldPath.startsWith(prefix)
+      );
       this._buildFileTree(folder, focus);
     }
     if (folder.files.length + folder.subFolders.length > 0 || folder.infoItem) {
