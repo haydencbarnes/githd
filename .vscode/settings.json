@@ -2,6 +2,8 @@
 {
     "typescript.tsdk": "node_modules/typescript/lib",
     "typescript.enablePromptUseWorkspaceTsdk": true,
+    "eslint.validate": ["typescript"],
+    "eslint.run": "onType",
     "files.exclude": {
         "out": false // set this to true to hide the "out" folder with the compiled JS files
     },

@@ -104,16 +104,9 @@ export class Dataloader {
     }
 
     const key = this._cache.logEntryKey(branch, isStash ?? false, file?.fsPath, line, author, startTime, endTime);
-    const cache: GitLogEntry[] | undefined = this._cache.logEntries.get(key);
-    if (cache) {
-      if (cache.length < Cache.logEntriesCount) {
-        // We have the full log entries
-        return cache.slice(start, start + count);
-      }
-
-      if (start + count < cache.length) {
-        return cache.slice(start, start + count);
-      }
+    const cached = this._getCachedLogEntries(key, start, count);
+    if (cached) {
+      return cached;
     }
 
     const entries = await this._gitService.getLogEntries(
@@ -161,6 +154,16 @@ export class Dataloader {
       Tracer.info(`Dataloader: cache missing for non-first page ${key}, start {${start}}, count ${count}`);
     }
     return entries;
+  }
+
+  // Returns the requested page from the cache when it holds either the full log
+  // (fewer entries than the cache limit) or at least the whole page.
+  private _getCachedLogEntries(key: string, start: number, count: number): GitLogEntry[] | undefined {
+    const cache: GitLogEntry[] | undefined = this._cache.logEntries.get(key);
+    if (cache && (cache.length < Cache.logEntriesCount || start + count < cache.length)) {
+      return cache.slice(start, start + count);
+    }
+    return undefined;
   }
 
   async getCommitsCount(

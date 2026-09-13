@@ -47,6 +47,8 @@ export function parseGitPath(value: string): string {
 // Merge commits report one status letter per parent (e.g. MM); the first one is used.
 // git show may print header lines (e.g. signature verification) ahead of the first status; since
 // they are newline terminated, the status is taken from the last line of the token.
+const nameStatusCodes = new Set(['M', 'A', 'D', 'T', 'R', 'C']);
+
 export function parseNameStatus(output: string): GitFileChange[] {
   const changes: GitFileChange[] = [];
   const tokens = output.split('\0');
@@ -57,16 +59,8 @@ export function parseNameStatus(output: string): GitFileChange[] {
       continue;
     }
     const status = match[1];
-    switch (status) {
-      case 'M':
-      case 'A':
-      case 'D':
-      case 'T':
-      case 'R':
-      case 'C':
-        break;
-      default:
-        throw new Error('Cannot parse ' + tokens.slice(i, i + 2).join(' '));
+    if (!nameStatusCodes.has(status)) {
+      throw new Error('Cannot parse ' + tokens.slice(i, i + 2).join(' '));
     }
     const oldPath = tokens[++i];
     const newPath = status === 'R' || status === 'C' ? tokens[++i] : oldPath;

@@ -10,6 +10,21 @@ import { GitLineCounts, parseGitPath, parseNameStatus, parseNumStat } from './gi
 
 const EntrySeparator = '[githd-es]';
 const FormatSeparator = '[githd-fs]';
+// refs of the in-progress operations that may leave conflicted (staged) files in the index
+const OperationRefs = ['MERGE_HEAD', 'REBASE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD'];
+
+// order of the fields in a log entry, see getLogEntries
+enum LogItem {
+  subject,
+  hash,
+  ref,
+  author,
+  email,
+  timestamp,
+  date,
+  relativeDate,
+  additional
+}
 
 function normalizeFilePath(fsPath: string): string {
   fsPath = path.normalize(fsPath);
@@ -91,6 +106,24 @@ export interface GitBlameItem {
   relativeDate?: string;
   email?: string;
   stat?: string;
+}
+
+// a merge stage (1: base, 2: ours, 3: theirs) of a conflicted file in the index
+interface StagedFile {
+  repo: GitRepo;
+  file: vs.Uri;
+  relativePath: string;
+  stage: number;
+  blob: string;
+}
+
+interface BlameInfo {
+  hash: string;
+  subject: string;
+  author: string;
+  email: string;
+  date: string;
+  history?: GitBlameItem['history'];
 }
 
 function singleLined(value: string): string {
@@ -336,122 +369,96 @@ export class GitService {
     if (!repo) {
       return [];
     }
-    let format = EntrySeparator;
-    if (isStash) {
-      format += '%gd:';
-    }
 
-    enum logItem {
-      subject,
-      hash,
-      ref,
-      author,
-      email,
-      timestamp,
-      date,
-      relativeDate,
-      additional,
-      total
-    }
-
-    format += `%s${FormatSeparator}%h${FormatSeparator}%d${FormatSeparator}%aN${FormatSeparator}%ae${FormatSeparator}%ct${FormatSeparator}%cd${FormatSeparator}%cr${FormatSeparator}`;
-    let args: string[] = [`--format=${format}`, '--date=local'];
-    if (!express && !line) {
-      args.push('--shortstat');
-    }
-    if (isStash) {
-      args.unshift('stash', 'list');
-    } else {
-      args.unshift('log', `--skip=${start}`, `--max-count=${count}`, '--date-order', '--simplify-merges', branch);
-      if (author) {
-        args.push(`--author=${author}`);
-      }
-      if (startTime) {
-        args.push(`--after=${startTime.toISOString()}`);
-      }
-      if (endTime) {
-        args.push(`--before=${endTime.toISOString()}`);
-      }
-
-      if (file) {
-        const filePath = (await this.getGitRelativePath(file)) ?? '.';
-        if (line) {
-          args.push(`-L ${line},${line}:${filePath}`, '--');
-        } else {
-          args.push('--follow', '--', filePath);
-        }
-      } else {
-        // the '--' is to avoid same branch and file names caused error
-        args.push('--');
-      }
-    }
-
+    const args = await this._getLogArgs(express, start, count, branch, isStash, file, line, author, startTime, endTime);
     const result = await this._exec(args, repo.root);
-    let entries: GitLogEntry[] = [];
-
-    result.split(EntrySeparator).forEach(entry => {
-      if (!entry) {
-        return;
+    const entries: GitLogEntry[] = [];
+    for (const entry of result.split(EntrySeparator)) {
+      const parsed = this._parseLogEntry(entry, !!line);
+      if (parsed) {
+        entries.push(parsed);
       }
-      let subject: string;
-      let hash: string;
-      let ref: string;
-      let author: string;
-      let email: string;
-      let timestamp: number;
-      let date: string;
-      let relativeDate: string;
-      let stat: string;
-      let lineInfo: string;
-      entry.split(FormatSeparator).forEach((value, index) => {
-        switch (index % logItem.total) {
-          case logItem.subject:
-            subject = singleLined(value);
-            break;
-          case logItem.hash:
-            hash = value;
-            break;
-          case logItem.ref:
-            ref = value;
-            break;
-          case logItem.author:
-            author = value;
-            break;
-          case logItem.email:
-            email = value;
-            break;
-          case logItem.timestamp:
-            timestamp = parseInt(value);
-            break;
-          case logItem.date:
-            date = value;
-            break;
-          case logItem.relativeDate:
-            relativeDate = value;
-            break;
-          case logItem.additional:
-            if (!!line) {
-              lineInfo = value.trim();
-            } else {
-              stat = value.trim();
-            }
-            entries.push({
-              subject,
-              hash,
-              ref,
-              author,
-              email,
-              timestamp,
-              date,
-              relativeDate,
-              stat,
-              lineInfo
-            });
-            break;
-        }
-      });
-    });
+    }
     return entries;
+  }
+
+  private async _getLogArgs(
+    express: boolean,
+    start: number,
+    count: number,
+    branch: string,
+    isStash?: boolean,
+    file?: vs.Uri,
+    line?: number,
+    author?: string,
+    startTime?: Date,
+    endTime?: Date
+  ): Promise<string[]> {
+    const format =
+      `%s${FormatSeparator}%h${FormatSeparator}%d${FormatSeparator}%aN${FormatSeparator}%ae${FormatSeparator}` +
+      `%ct${FormatSeparator}%cd${FormatSeparator}%cr${FormatSeparator}`;
+    const statArgs = !express && !line ? ['--shortstat'] : [];
+    if (isStash) {
+      return ['stash', 'list', `--format=${EntrySeparator}%gd:${format}`, '--date=local', ...statArgs];
+    }
+    return [
+      'log',
+      `--skip=${start}`,
+      `--max-count=${count}`,
+      '--date-order',
+      '--simplify-merges',
+      branch,
+      `--format=${EntrySeparator}${format}`,
+      '--date=local',
+      ...statArgs,
+      ...this._getLogFilterArgs(author, startTime, endTime),
+      ...(await this._getLogPathArgs(file, line))
+    ];
+  }
+
+  private _getLogFilterArgs(author?: string, startTime?: Date, endTime?: Date): string[] {
+    const args: string[] = [];
+    if (author) {
+      args.push(`--author=${author}`);
+    }
+    if (startTime) {
+      args.push(`--after=${startTime.toISOString()}`);
+    }
+    if (endTime) {
+      args.push(`--before=${endTime.toISOString()}`);
+    }
+    return args;
+  }
+
+  private async _getLogPathArgs(file?: vs.Uri, line?: number): Promise<string[]> {
+    if (!file) {
+      // the '--' is to avoid same branch and file names caused error
+      return ['--'];
+    }
+    const filePath = (await this.getGitRelativePath(file)) ?? '.';
+    return line ? [`-L ${line},${line}:${filePath}`, '--'] : ['--follow', '--', filePath];
+  }
+
+  // parses one entry of the output of _getLogArgs. The trailing field is the line history when
+  // hasLine is set, the shortstat otherwise.
+  private _parseLogEntry(entry: string, hasLine: boolean): GitLogEntry | undefined {
+    const items = entry.split(FormatSeparator);
+    if (items.length <= LogItem.additional) {
+      return;
+    }
+    const additional = items[LogItem.additional].trim();
+    return {
+      subject: singleLined(items[LogItem.subject]),
+      hash: items[LogItem.hash],
+      ref: items[LogItem.ref],
+      author: items[LogItem.author],
+      email: items[LogItem.email],
+      timestamp: parseInt(items[LogItem.timestamp]),
+      date: items[LogItem.date],
+      relativeDate: items[LogItem.relativeDate],
+      stat: hasLine ? undefined : additional,
+      lineInfo: hasLine ? additional : undefined
+    };
   }
 
   async getCommitDetails(repo: GitRepo | undefined, ref: string, isStash?: boolean): Promise<string> {
@@ -499,23 +506,31 @@ export class GitService {
     if (file.scheme !== 'git') {
       return;
     }
+    const params = this._parseGitUriQuery(file.query);
+    if (!params) {
+      return;
+    }
+    const { path: filePath, ref } = params;
+    const stage = /^[:~]([1-3])$/.exec(ref);
+    if (stage) {
+      return { file: vs.Uri.file(filePath), useContents: true, stage: Number(stage[1]) };
+    }
+    const useContents = !ref || ref === '~' || /^[:~][0-3]$/.test(ref);
+    return { file: vs.Uri.file(filePath), ref: useContents ? undefined : ref, useContents };
+  }
+
+  // parses the query of a vscode 'git:' uri into the file path and the ref it points at
+  private _parseGitUriQuery(query: string): { path: string; ref: string } | undefined {
     try {
-      const params = JSON.parse(file.query);
-      if (
-        !params ||
-        typeof params.path !== 'string' ||
-        (params.ref !== undefined && typeof params.ref !== 'string') ||
-        params.submoduleOf
-      ) {
+      const params = JSON.parse(query);
+      if (!params || params.submoduleOf) {
         return;
       }
-      const ref = params.ref ?? '';
-      const stage = /^[:~]([1-3])$/.exec(ref);
-      if (stage) {
-        return { file: vs.Uri.file(params.path), useContents: true, stage: Number(stage[1]) };
+      const { path: filePath, ref = '' } = params;
+      if (typeof filePath !== 'string' || typeof ref !== 'string') {
+        return;
       }
-      const useContents = !ref || ref === '~' || /^[:~][0-3]$/.test(ref);
-      return { file: vs.Uri.file(params.path), ref: useContents ? undefined : ref, useContents };
+      return { path: filePath, ref };
     } catch {
       return;
     }
@@ -538,76 +553,120 @@ export class GitService {
       return;
     }
 
-    const operationRefs = ['MERGE_HEAD', 'REBASE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD'];
-    const refs = source.stage === 2 ? ['HEAD'] : operationRefs;
+    const staged: StagedFile = { repo, file: source.file, relativePath, stage: source.stage, blob };
+    const refs = source.stage === 2 ? ['HEAD'] : OperationRefs;
     for (const ref of refs) {
-      const commit = (await this._exec(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], repo.root)).trim();
-      if (!commit) {
-        continue;
-      }
-      const useParents = ref === 'REVERT_HEAD' ? source.stage === 3 : source.stage === 1;
-      const candidates = !useParents
-        ? [commit]
-        : ref === 'MERGE_HEAD'
-          ? (await this._exec(['merge-base', '--all', 'HEAD', commit], repo.root)).trim().split(/\s+/)
-          : (await this._exec(['rev-list', '--parents', '-n', '1', commit], repo.root)).trim().split(/\s+/).slice(1);
-      const exactCandidates: string[] = [];
-      for (const candidate of candidates.filter(Boolean)) {
-        const candidateBlob = (await this._exec(
-          ['rev-parse', '--verify', '--quiet', `${candidate}:${relativePath}`], repo.root
-        )).trim();
-        if (candidateBlob === blob) {
-          exactCandidates.push(candidate);
-        }
-      }
-      if (exactCandidates.length > 0) {
-        return exactCandidates.length === 1
-          ? { file: source.file, ref: exactCandidates[0], useContents: false }
-          : undefined;
-      }
-
-      const renamedCandidates: { file: vs.Uri; ref: string }[] = [];
-      for (const candidate of candidates.filter(Boolean)) {
-        const entries = (await this._exec(['ls-tree', '-r', '--full-tree', '-z', candidate], repo.root)).split('\0');
-        const matches = entries
-          .filter(entry => entry.substring(0, entry.indexOf('\t')).split(' ')[2] === blob)
-          .map(entry => entry.substring(entry.indexOf('\t') + 1));
-        if (matches.length === 1 && candidates.length === 1) {
-          return { file: vs.Uri.file(path.join(repo.root, matches[0])), ref: candidate, useContents: false };
-        }
-        if (matches.length > 0) {
-          const renamedPaths = new Set<string>();
-          const targetRefs = source.stage === 2 ? operationRefs : ['HEAD', ref];
-          for (const targetRef of targetRefs) {
-            const target = (await this._exec(
-              ['rev-parse', '--verify', '--quiet', `${targetRef}^{commit}`], repo.root
-            )).trim();
-            if (!target) {
-              continue;
-            }
-            const targets = targetRef === 'REVERT_HEAD'
-              ? (await this._exec(['rev-list', '--parents', '-n', '1', target], repo.root)).trim().split(/\s+/).slice(1)
-              : [target];
-            for (const targetCommit of targets.filter(value => value && value !== candidate)) {
-              const renames = (await this._exec(
-                ['diff', '--name-status', '--find-renames', '--diff-filter=R', '-z', candidate, targetCommit], repo.root
-              )).split('\0');
-              for (let offset = 0; offset + 2 < renames.length; offset += 3) {
-                if (renames[offset + 2] === relativePath && matches.includes(renames[offset + 1])) {
-                  renamedPaths.add(renames[offset + 1]);
-                }
-              }
-            }
-          }
-          for (const filename of renamedPaths) {
-            renamedCandidates.push({ file: vs.Uri.file(path.join(repo.root, filename)), ref: candidate });
-          }
-        }
-      }
-      if (renamedCandidates.length > 0) {
-        return renamedCandidates.length === 1 ? { ...renamedCandidates[0], useContents: false } : undefined;
+      const matches = await this._findStagedFileMatches(staged, ref);
+      if (matches.length > 0) {
+        // more than one match means the revision is ambiguous, give up
+        return matches.length === 1 ? { ...matches[0], useContents: false } : undefined;
       }
     }
+  }
+
+  // returns the commits reachable from the operation ref that may hold the given stage of the file
+  private async _getStageCommits(repo: GitRepo, stage: number, ref: string): Promise<string[]> {
+    const commit = (await this._exec(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], repo.root)).trim();
+    if (!commit) {
+      return [];
+    }
+    const useParents = ref === 'REVERT_HEAD' ? stage === 3 : stage === 1;
+    if (!useParents) {
+      return [commit];
+    }
+    if (ref === 'MERGE_HEAD') {
+      return (await this._exec(['merge-base', '--all', 'HEAD', commit], repo.root)).trim().split(/\s+/).filter(Boolean);
+    }
+    return this._getParentCommits(repo, commit);
+  }
+
+  private async _getParentCommits(repo: GitRepo, commit: string): Promise<string[]> {
+    const result = await this._exec(['rev-list', '--parents', '-n', '1', commit], repo.root);
+    return result.trim().split(/\s+/).slice(1).filter(Boolean);
+  }
+
+  // returns the [file, commit] pairs holding the staged content among the commits of the operation ref,
+  // either at the same path or at a path which was renamed to it
+  private async _findStagedFileMatches(staged: StagedFile, ref: string): Promise<{ file: vs.Uri; ref: string }[]> {
+    const { repo, relativePath, blob } = staged;
+    const commits = await this._getStageCommits(repo, staged.stage, ref);
+    const exactCommits = await this._filterCommitsWithBlob(staged, commits);
+    if (exactCommits.length > 0) {
+      return exactCommits.map(commit => ({ file: staged.file, ref: commit }));
+    }
+
+    const targetRefs = staged.stage === 2 ? OperationRefs : ['HEAD', ref];
+    const renamed: { file: vs.Uri; ref: string }[] = [];
+    for (const commit of commits) {
+      const paths = await this._findBlobPaths(repo, commit, blob);
+      if (paths.length === 1 && commits.length === 1) {
+        return [{ file: vs.Uri.file(path.join(repo.root, paths[0])), ref: commit }];
+      }
+      if (paths.length > 0) {
+        const renamedPaths = await this._findRenamedPaths(repo, commit, paths, relativePath, targetRefs);
+        for (const filename of renamedPaths) {
+          renamed.push({ file: vs.Uri.file(path.join(repo.root, filename)), ref: commit });
+        }
+      }
+    }
+    return renamed;
+  }
+
+  // returns the commits in which the file has the staged content at the same path
+  private async _filterCommitsWithBlob(staged: StagedFile, commits: string[]): Promise<string[]> {
+    const { repo, relativePath, blob } = staged;
+    const result: string[] = [];
+    for (const commit of commits) {
+      const commitBlob = (
+        await this._exec(['rev-parse', '--verify', '--quiet', `${commit}:${relativePath}`], repo.root)
+      ).trim();
+      if (commitBlob === blob) {
+        result.push(commit);
+      }
+    }
+    return result;
+  }
+
+  // returns the paths of all the files in the commit whose content is the blob
+  private async _findBlobPaths(repo: GitRepo, commit: string, blob: string): Promise<string[]> {
+    const entries = (await this._exec(['ls-tree', '-r', '--full-tree', '-z', commit], repo.root)).split('\0');
+    return entries
+      .filter(entry => entry.substring(0, entry.indexOf('\t')).split(' ')[2] === blob)
+      .map(entry => entry.substring(entry.indexOf('\t') + 1));
+  }
+
+  // returns the paths (among `paths`) of the commit which are renamed to relativePath in any of the target refs
+  private async _findRenamedPaths(
+    repo: GitRepo,
+    commit: string,
+    paths: string[],
+    relativePath: string,
+    targetRefs: string[]
+  ): Promise<Set<string>> {
+    const renamedPaths = new Set<string>();
+    for (const targetRef of targetRefs) {
+      const target = (
+        await this._exec(['rev-parse', '--verify', '--quiet', `${targetRef}^{commit}`], repo.root)
+      ).trim();
+      if (!target) {
+        continue;
+      }
+      const targets = targetRef === 'REVERT_HEAD' ? await this._getParentCommits(repo, target) : [target];
+      for (const targetCommit of targets.filter(value => value !== commit)) {
+        const renames = (
+          await this._exec(
+            ['diff', '--name-status', '--find-renames', '--diff-filter=R', '-z', commit, targetCommit],
+            repo.root
+          )
+        ).split('\0');
+        for (let offset = 0; offset + 2 < renames.length; offset += 3) {
+          if (renames[offset + 2] === relativePath && paths.includes(renames[offset + 1])) {
+            renamedPaths.add(renames[offset + 1]);
+          }
+        }
+      }
+    }
+    return renamedPaths;
   }
 
   async getHistoryRevision(file: vs.Uri, line?: number): Promise<{ file: vs.Uri; ref?: string; line?: number } | undefined> {
@@ -668,6 +727,28 @@ export class GitService {
     }
     args.push('--', filePath);
     const result = await this._exec(args, repo.root, false, contents);
+    const blame = this._parseBlame(result, repo);
+    const { hash, subject, author, email, date } = blame;
+    if ([hash, subject, author, email, date].some(v => !v)) {
+      Tracer.warning(
+        `Blame info missed. repo ${repo.root} file ${filePath}:${line} ${hash}` +
+          ` author: ${author}, mail: ${email}, date: ${date}, summary: ${subject}`
+      );
+      return;
+    }
+
+    if (isEmptyHash(hash)) {
+      Tracer.verbose(`Blame info skipped. repo ${repo.root} file ${filePath}:${line} ${hash}`);
+      return { file, line, hash };
+    }
+
+    // the commit info replaces the full hash with the abbreviated one
+    const commit = await this._getBlameCommitInfo(repo, hash);
+    return { file, line, ...blame, ...commit };
+  }
+
+  // parses the output of 'git blame --incremental' for a single line
+  private _parseBlame(output: string, repo: GitRepo): BlameInfo {
     let hash = '';
     let originalLine = -1;
     let originalFile: vs.Uri | undefined;
@@ -675,7 +756,7 @@ export class GitService {
     let author = '';
     let date = '';
     let email = '';
-    result.split(/\r?\n/g).forEach((line, index) => {
+    output.split(/\r?\n/g).forEach((line, index) => {
       if (index == 0) {
         const fields = line.split(' ');
         hash = fields[0];
@@ -708,46 +789,29 @@ export class GitService {
         }
       }
     });
-    if ([hash, subject, author, email, date].some(v => !v)) {
-      Tracer.warning(
-        `Blame info missed. repo ${repo.root} file ${filePath}:${line} ${hash}` +
-          ` author: ${author}, mail: ${email}, date: ${date}, summary: ${subject}`
-      );
-      return;
-    }
 
-    if (isEmptyHash(hash)) {
-      Tracer.verbose(`Blame info skipped. repo ${repo.root} file ${filePath}:${line} ${hash}`);
-      return { file, line, hash };
-    }
+    const history =
+      originalFile && Number.isInteger(originalLine) && originalLine >= 0
+        ? { file: originalFile, line: originalLine, ref: hash }
+        : undefined;
+    return { hash, subject, author, email, date, history };
+  }
 
-    const history = originalFile && Number.isInteger(originalLine) && originalLine >= 0
-      ? { file: originalFile, line: originalLine, ref: hash }
-      : undefined;
-
-    // get additional info: abbrev hash, relative date, body, stat
+  // get additional info of the commit: abbrev hash, relative date, body, stat
+  private async _getBlameCommitInfo(
+    repo: GitRepo,
+    hash: string
+  ): Promise<{ hash: string; relativeDate: string; body: string; stat: string }> {
     const addition: string = await this._exec(
       ['show', `--format=%h${FormatSeparator}%cr${FormatSeparator}%b${FormatSeparator}`, '--stat', `${hash}`],
       repo.root
     );
-    //const firstLine = addition.split(/\r?\n/g)[0];
     const items = addition.split(FormatSeparator);
-    hash = items[0] ?? '';
-    const relativeDate = items[1] ?? '';
-    const body = items[2]?.trim() ?? '';
-    const stat = ' ' + items[3]?.trim();
     return {
-      file,
-      line,
-      subject,
-      body,
-      hash,
-      history,
-      author,
-      date,
-      email,
-      relativeDate,
-      stat
+      hash: items[0] ?? '',
+      relativeDate: items[1] ?? '',
+      body: items[2]?.trim() ?? '',
+      stat: ' ' + items[3]?.trim()
     };
   }
 

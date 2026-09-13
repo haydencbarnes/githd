@@ -371,47 +371,9 @@ export class HistoryViewProvider implements vs.TextDocumentContentProvider {
 
     Tracer.info(`HistoryView: _updateContent. ${JSON.stringify(context)}`);
 
-    const timeRangeSet = context.startTime || context.endTime;
     const isStash = context.isStash ?? false;
     const firstLoading = this._leftCount == 0;
-    let loadingCount = this._express ? 3 * firstLoadingCount : firstLoadingCount;
-    if (firstLoading) {
-      if (loadMore) {
-        this._content = this._content.substring(0, this._content.length - moreLabel.length - 1);
-        this._content += separatorLabel + '\n\n';
-        this._currentLine += 2;
-      } else {
-        this._content = '';
-      }
-
-      // No pagination loading for statsh and file history. When specifiedPath is set, we need the git
-      // option --follow but it is not compatible with certain commit-limiting options, such as --skip
-      if (isStash || context.specifiedPath) {
-        loadingCount = 10000; // Display at most 10k commits
-      } else {
-        if (this._totalCommitsCount == 0) {
-          this._totalCommitsCount = await this._loader.getCommitsCount(
-            context.repo,
-            context.branch,
-            context.author,
-            context.startTime,
-            context.endTime
-          );
-        }
-
-        // pageSize is the total count includes multiple loadings
-        let pageSize = Math.min(this._totalCommitsCount - this._loadedCount, this._commitsCount);
-        if (this._loadAll || timeRangeSet) {
-          pageSize = this._totalCommitsCount - this._loadedCount;
-        } else if (loadMore) {
-          pageSize = Math.min(2 * this._loadedCount, maxPageSize);
-        }
-        this._leftCount = Math.max(0, pageSize - loadingCount);
-      }
-    } else {
-      loadingCount = Math.min(this._leftCount, maxSingleLoadingCount);
-      this._leftCount = this._leftCount - loadingCount;
-    }
+    const loadingCount = await this._prepareLoadingCount(context, loadMore, firstLoading);
     this._updating = this._leftCount > 0;
 
     Tracer.verbose(
@@ -454,17 +416,76 @@ export class HistoryViewProvider implements vs.TextDocumentContentProvider {
       ++this._currentLine;
     });
 
-    // All loadings are finished.
-    if (!this._updating) {
-      if (this._totalCommitsCount > this._loadedCount && !context.startTime && !context.endTime) {
-        content += this._createClickableForMore();
-      } else {
-        this._moreClickableRange = undefined;
-      }
-    }
+    content += this._getMoreClickableContent(context);
 
     this._content += content;
     this._update();
+  }
+
+  // Resets content for the first loading of a page and computes how many entries to load
+  // in this round, updating _leftCount and _totalCommitsCount as needed.
+  private async _prepareLoadingCount(
+    context: HistoryViewContext,
+    loadMore: boolean,
+    firstLoading: boolean
+  ): Promise<number> {
+    if (!firstLoading) {
+      const loadingCount = Math.min(this._leftCount, maxSingleLoadingCount);
+      this._leftCount = this._leftCount - loadingCount;
+      return loadingCount;
+    }
+
+    if (loadMore) {
+      this._content = this._content.substring(0, this._content.length - moreLabel.length - 1);
+      this._content += separatorLabel + '\n\n';
+      this._currentLine += 2;
+    } else {
+      this._content = '';
+    }
+
+    // No pagination loading for stash and file history. When specifiedPath is set, we need the git
+    // option --follow but it is not compatible with certain commit-limiting options, such as --skip
+    if (context.isStash || context.specifiedPath) {
+      return 10000; // Display at most 10k commits
+    }
+
+    if (this._totalCommitsCount == 0) {
+      this._totalCommitsCount = await this._loader.getCommitsCount(
+        context.repo,
+        context.branch,
+        context.author,
+        context.startTime,
+        context.endTime
+      );
+    }
+
+    const loadingCount = this._express ? 3 * firstLoadingCount : firstLoadingCount;
+    // pageSize is the total count includes multiple loadings
+    const pageSize = this._computePageSize(context, loadMore);
+    this._leftCount = Math.max(0, pageSize - loadingCount);
+    return loadingCount;
+  }
+
+  private _computePageSize(context: HistoryViewContext, loadMore: boolean): number {
+    if (this._loadAll || context.startTime || context.endTime) {
+      return this._totalCommitsCount - this._loadedCount;
+    }
+    if (loadMore) {
+      return Math.min(2 * this._loadedCount, maxPageSize);
+    }
+    return Math.min(this._totalCommitsCount - this._loadedCount, this._commitsCount);
+  }
+
+  // All loadings are finished: append the "more" clickable if there are still commits to load.
+  private _getMoreClickableContent(context: HistoryViewContext): string {
+    if (this._updating) {
+      return '';
+    }
+    if (this._totalCommitsCount > this._loadedCount && !context.startTime && !context.endTime) {
+      return this._createClickableForMore();
+    }
+    this._moreClickableRange = undefined;
+    return '';
   }
 
   private async _updateTitleInfo(context: HistoryViewContext): Promise<string> {

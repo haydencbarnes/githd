@@ -223,8 +223,13 @@ export class BlameViewProvider {
     }
   }
 
+  // The blame decoration is only shown for the active, saved editor while the view is enabled.
+  private _canUpdate(editor: vs.TextEditor): boolean {
+    return editor === vs.window.activeTextEditor && !editor.document.isDirty && this._enabled;
+  }
+
   private async _update(editor: vs.TextEditor): Promise<void> {
-    if (editor !== vs.window.activeTextEditor || editor.document.isDirty || !this._enabled) {
+    if (!this._canUpdate(editor)) {
       return;
     }
     const file = editor.document.uri;
@@ -236,12 +241,10 @@ export class BlameViewProvider {
     const blame = await this._gitService.getBlameItem(file, line);
     if (
       updateVersion !== this._updateVersion ||
-      editor !== vs.window.activeTextEditor ||
+      !this._canUpdate(editor) ||
       file !== editor.document.uri ||
       line !== editor.selection.active.line ||
-      documentVersion !== editor.document.version ||
-      editor.document.isDirty ||
-      !this._enabled
+      documentVersion !== editor.document.version
     ) {
       Tracer.info(`This update is outdated. ${file.fsPath}: ${line}, dirty ${editor.document.isDirty}`);
       return;

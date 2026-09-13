@@ -13,20 +13,16 @@
 
   function initializeChart() {
     if (typeof Chart === 'undefined') {
-      console.error('Chart.js not loaded. Attempting to load...');
-      const script = document.createElement('script');
-      script.src = 'https://cdn.jsdelivr.net/npm/chart.js';
-      script.onload = () => {
-        log('Chart.js loaded successfully');
-        setupEventListeners();
-      };
-      script.onerror = () => {
-        displayError('Failed to load Chart.js library');
-      };
-      document.head.appendChild(script);
-    } else {
-      setupEventListeners();
+      const message = 'Unable to load the statistics chart. Reload the window to try again.';
+      displayError(message);
+      const error = document.createElement('p');
+      error.setAttribute('role', 'alert');
+      error.textContent = message;
+      document.getElementById('chart').replaceWith(error);
+      return;
     }
+
+    setupEventListeners();
   }
 
   function setupEventListeners() {

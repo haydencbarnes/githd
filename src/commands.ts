@@ -11,6 +11,18 @@ import { ExplorerViewProvider } from './explorerViewProvider';
 import { Dataloader } from './dataloader';
 import { PanelViewProvider } from './panelViewProvider';
 
+function activeFile(): vs.Uri | undefined {
+  return vs.window.activeTextEditor?.document.uri;
+}
+
+function activeLine(): number | undefined {
+  return vs.window.activeTextEditor?.selection.active.line;
+}
+
+function isValidLine(line?: number): line is number {
+  return line !== undefined && Number.isInteger(line) && line >= 0;
+}
+
 function toGitUri(uri: vs.Uri, ref?: string): vs.Uri {
   return uri.with({
     scheme: 'git',
@@ -154,7 +166,7 @@ export class CommandCenter {
   }
 
   @command('githd.viewFileHistory')
-  async viewFileHistory(specifiedPath = vs.window.activeTextEditor?.document?.uri): Promise<void> {
+  async viewFileHistory(specifiedPath = activeFile()): Promise<void> {
     Tracer.verbose('Command: githd.viewFileHistory');
     if (!specifiedPath) {
       return;
@@ -177,12 +189,9 @@ export class CommandCenter {
   }
 
   @command('githd.viewLineHistory')
-  async viewLineHistory(
-    file = vs.window.activeTextEditor?.document?.uri,
-    line = vs.window.activeTextEditor?.selection?.active?.line
-  ): Promise<void> {
+  async viewLineHistory(file = activeFile(), line = activeLine()): Promise<void> {
     Tracer.verbose('Command: githd.viewLineHistory');
-    if (!file || line === undefined || !Number.isInteger(line) || line < 0) {
+    if (!file || !isValidLine(line)) {
       return;
     }
 

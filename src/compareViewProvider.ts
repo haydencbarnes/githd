@@ -176,6 +176,10 @@ export class CompareViewProvider implements vs.TreeDataProvider<vs.TreeItem> {
     );
   }
 
+  private _isCurrentRepo(repo: GitRepo): boolean {
+    return this._repo?.root === repo.root;
+  }
+
   private async _selectBranch(side: 'base' | 'compare'): Promise<void> {
     const repo = this._repo;
     if (!repo) {
@@ -183,37 +187,44 @@ export class CompareViewProvider implements vs.TreeDataProvider<vs.TreeItem> {
       return;
     }
     try {
-      const refs = await this._getBranches(repo);
-      if (this._repo?.root !== repo.root) {
-        return;
-      }
-      if (!refs.length) {
-        this._view.message = 'No branches available.';
-        return;
-      }
-      const items: BranchPickItem[] = refs.map(ref => ({
-        label: ref.name!,
-        description: `${ref.type === GitRefType.RemoteHead ? 'Remote' : 'Local'} branch at ${ref.commit}`,
-        ref
-      }));
-      const selected = await vs.window.showQuickPick(items, {
-        title: side === 'base' ? 'Compare: Base Branch (Left)' : 'Compare: Branch (Right)',
-        matchOnDescription: true
-      });
-      if (!selected || this._repo?.root !== repo.root) {
+      const selected = await this._pickBranch(repo, side);
+      if (!selected || !this._isCurrentRepo(repo)) {
         return;
       }
       if (side === 'base') {
-        this._base = selected.ref;
+        this._base = selected;
       } else {
-        this._compare = selected.ref;
+        this._compare = selected;
       }
       await this._refresh();
     } catch (error) {
-      if (this._repo?.root === repo.root) {
+      if (this._isCurrentRepo(repo)) {
         vs.window.showErrorMessage(`GitHD: Unable to load branches. ${String(error).trim()}`);
       }
     }
+  }
+
+  // Shows the branch picker for one side of the comparison. Resolves to undefined when nothing
+  // was picked or the repository changed while the branches were loading.
+  private async _pickBranch(repo: GitRepo, side: 'base' | 'compare'): Promise<GitRef | undefined> {
+    const refs = await this._getBranches(repo);
+    if (!this._isCurrentRepo(repo)) {
+      return undefined;
+    }
+    if (!refs.length) {
+      this._view.message = 'No branches available.';
+      return undefined;
+    }
+    const items: BranchPickItem[] = refs.map(ref => ({
+      label: ref.name!,
+      description: `${ref.type === GitRefType.RemoteHead ? 'Remote' : 'Local'} branch at ${ref.commit}`,
+      ref
+    }));
+    const selected = await vs.window.showQuickPick(items, {
+      title: side === 'base' ? 'Compare: Base Branch (Left)' : 'Compare: Branch (Right)',
+      matchOnDescription: true
+    });
+    return selected?.ref;
   }
 
   private async _refresh(): Promise<void> {
@@ -227,46 +238,7 @@ export class CompareViewProvider implements vs.TreeDataProvider<vs.TreeItem> {
       return;
     }
     try {
-      const refs = await this._getBranches(repo);
-      if (request !== this._request) {
-        return;
-      }
-      this._base = refs.find(ref => ref.name === this._base?.name && ref.type === this._base?.type);
-      this._compare = refs.find(ref => ref.name === this._compare?.name && ref.type === this._compare?.type);
-      const base = this._base;
-      const compare = this._compare;
-      if (!base || !compare) {
-        this._view.message = refs.length ? 'Two branches required.' : 'No branches available.';
-        return;
-      }
-      this._view.message = 'Loading comparison...';
-      // Line counts require git to diff every file, so they are requested alongside the file list
-      // and filled in once the list is shown. A failure only leaves the counts out (getLineCounts
-      // does not throw), while a failure to list the files is reported below.
-      const lineCountsRequest = this._gitService.getLineCounts(repo, base.commit, compare.commit);
-      const [, files] = await this._gitService.getCommittedFiles(repo, compare.commit, base.commit, false, true);
-      if (request !== this._request) {
-        return;
-      }
-      this._files = files
-        .sort((left, right) => left.gitRelativePath.localeCompare(right.gitRelativePath))
-        .map(file => new CompareFileItem(file, repo, base, compare));
-      this._view.description = `${files.length} changed file${files.length === 1 ? '' : 's'}`;
-      this._view.message = files.length ? undefined : 'No differences between these branches.';
-      this._onDidChange.fire(undefined);
-
-      const lineCounts = await lineCountsRequest;
-      if (request !== this._request || !lineCounts.size) {
-        return;
-      }
-      let insertions = 0;
-      let deletions = 0;
-      lineCounts.forEach(counts => {
-        insertions += counts.insertions;
-        deletions += counts.deletions;
-      });
-      this._files.forEach(item => item.setLineCounts(lineCounts.get(item.file.gitRelativePath)));
-      this._view.description += descriptionSeparator + formatCounts(insertions, deletions);
+      await this._loadComparison(repo, request);
     } catch (error) {
       if (request === this._request) {
         this._view.message = `Unable to compare branches. ${String(error).trim()}`;
@@ -276,5 +248,57 @@ export class CompareViewProvider implements vs.TreeDataProvider<vs.TreeItem> {
         this._onDidChange.fire(undefined);
       }
     }
+  }
+
+  // Re-resolves the selected branches against the repository and lists the files that differ
+  // between them. Bails out silently whenever a newer request has superseded this one.
+  private async _loadComparison(repo: GitRepo, request: number): Promise<void> {
+    const refs = await this._getBranches(repo);
+    if (request !== this._request) {
+      return;
+    }
+    this._base = refs.find(ref => ref.name === this._base?.name && ref.type === this._base?.type);
+    this._compare = refs.find(ref => ref.name === this._compare?.name && ref.type === this._compare?.type);
+    const base = this._base;
+    const compare = this._compare;
+    if (!base || !compare) {
+      this._view.message = refs.length ? 'Two branches required.' : 'No branches available.';
+      return;
+    }
+    this._view.message = 'Loading comparison...';
+    // Line counts require git to diff every file, so they are requested alongside the file list
+    // and filled in once the list is shown. A failure only leaves the counts out (getLineCounts
+    // does not throw), while a failure to list the files is reported by _refresh.
+    const lineCountsRequest = this._gitService.getLineCounts(repo, base.commit, compare.commit);
+    const [, files] = await this._gitService.getCommittedFiles(repo, compare.commit, base.commit, false, true);
+    if (request !== this._request) {
+      return;
+    }
+    this._files = files
+      .sort((left, right) => left.gitRelativePath.localeCompare(right.gitRelativePath))
+      .map(file => new CompareFileItem(file, repo, base, compare));
+    this._view.description = `${files.length} changed file${files.length === 1 ? '' : 's'}`;
+    this._view.message = files.length ? undefined : 'No differences between these branches.';
+    this._onDidChange.fire(undefined);
+
+    const lineCounts = await lineCountsRequest;
+    if (request === this._request) {
+      this._applyLineCounts(lineCounts);
+    }
+  }
+
+  // Fills in the per-file line counts and appends their totals to the view description.
+  private _applyLineCounts(lineCounts: Map<string, GitLineCounts>): void {
+    if (!lineCounts.size) {
+      return;
+    }
+    let insertions = 0;
+    let deletions = 0;
+    lineCounts.forEach(counts => {
+      insertions += counts.insertions;
+      deletions += counts.deletions;
+    });
+    this._files.forEach(item => item.setLineCounts(lineCounts.get(item.file.gitRelativePath)));
+    this._view.description += descriptionSeparator + formatCounts(insertions, deletions);
   }
 }

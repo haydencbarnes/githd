@@ -140,14 +140,7 @@ export class Model {
 
     Tracer.info(`Model: set filesViewContext - ${JSON.stringify(context)}`);
 
-    const currentContext = this.filesViewContext;
-    if (
-      !currentContext ||
-      currentContext.leftRef != context?.leftRef ||
-      currentContext.rightRef != context?.rightRef ||
-      currentContext.specifiedPath != context?.specifiedPath ||
-      currentContext.focusedLineInfo != context?.focusedLineInfo
-    ) {
+    if (this._hasFilesViewContextChanged(context)) {
       this._filesViewContextTracker.setContext({
         repo: context.repo,
         focusedLineInfo: context.focusedLineInfo,
@@ -163,6 +156,19 @@ export class Model {
     setTimeout(() => {
       vs.commands.executeCommand('workbench.view.extension.githd-explorer');
     }, 100);
+  }
+
+  private _hasFilesViewContextChanged(context: FilesViewContext): boolean {
+    const current = this.filesViewContext;
+    if (!current) {
+      return true;
+    }
+    return (
+      current.leftRef != context.leftRef ||
+      current.rightRef != context.rightRef ||
+      current.specifiedPath != context.specifiedPath ||
+      current.focusedLineInfo != context.focusedLineInfo
+    );
   }
 
   goBackFilesViewContext() {
