@@ -72,6 +72,99 @@ export function parseNameStatus(output: string): GitFileChange[] {
   return changes;
 }
 
+// Raw commit details of `git blame --incremental` output, shared by all the lines of the commit.
+export interface GitBlameCommit {
+  hash: string;
+  author: string;
+  email: string;
+  committerTime: string;
+  summary: string;
+}
+
+// The attribution of one line (0-based line numbers).
+export interface GitBlameLine {
+  commit: GitBlameCommit;
+  originalLine: number;
+  // path of the file the line is attributed to, relative to the repository root
+  filename: string;
+}
+
+interface BlameGroup {
+  commit: GitBlameCommit;
+  originalLine: number;
+  line: number;
+  count: number;
+  filename: string;
+}
+
+const blameHeader = /^([0-9a-f]{40,64}) (\d+) (\d+) (\d+)$/;
+
+// Parses `git blame --incremental` output into [final line, attribution]. Every group of lines
+// starts with a header `<hash> <original line> <final line> <count>`, followed by the commit
+// details the first time the commit is seen and by the `filename` of the group.
+export function parseBlameIncremental(output: string): Map<number, GitBlameLine> {
+  const commits = new Map<string, GitBlameCommit>();
+  const groups: BlameGroup[] = [];
+  let group: BlameGroup | undefined;
+  for (const line of output.split(/\r?\n/g)) {
+    const header = blameHeader.exec(line);
+    if (header) {
+      const [, hash, originalLine, finalLine, count] = header;
+      let commit = commits.get(hash);
+      if (!commit) {
+        commit = { hash, author: '', email: '', committerTime: '', summary: '' };
+        commits.set(hash, commit);
+      }
+      group = {
+        commit,
+        originalLine: Number(originalLine) - 1,
+        line: Number(finalLine) - 1,
+        count: Number(count),
+        filename: ''
+      };
+      groups.push(group);
+    } else if (group) {
+      parseBlameDetail(group, line);
+    }
+  }
+
+  const lines = new Map<number, GitBlameLine>();
+  for (const { commit, originalLine, line, count, filename } of groups) {
+    for (let i = 0; i < count; i++) {
+      lines.set(line + i, { commit, originalLine: originalLine + i, filename });
+    }
+  }
+  return lines;
+}
+
+function parseBlameDetail(group: BlameGroup, line: string): void {
+  const name = line.split(' ')[0];
+  if (name === 'filename') {
+    group.filename = parseGitPath(line.substring(name.length + 1));
+    return;
+  }
+  const value = line.substring(name.length).trim();
+  if (!value) {
+    return;
+  }
+  switch (name) {
+    case 'author':
+      group.commit.author = value;
+      break;
+    case 'author-mail':
+      group.commit.email = value;
+      break;
+    case 'committer-time':
+      group.commit.committerTime = value;
+      break;
+    case 'summary':
+      group.commit.summary = value;
+      break;
+    default:
+      break;
+  }
+}
+
 // Parses `git diff --numstat -z` output into [new path, line counts]:
 //   insertions\tdeletions\tpath\0
 //   insertions\tdeletions\t\0old_path\0new_path\0    for renames and copies

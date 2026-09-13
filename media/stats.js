@@ -101,7 +101,8 @@
 
     data.reverse();
 
-    currentData = data;
+    // parse the stats once: the data is aggregated again on every resize
+    currentData = data.map(entry => ({ ...parseStats(entry.stats), date: entry.date }));
     currentBucketsCount = bucketsCount;
     log('Raw data:', JSON.stringify(data.slice(0, 5))); // Log first 5 items
     createOrUpdateChart();
@@ -387,15 +388,12 @@
     // Handle case where start and end are very close or identical
     if (end - start < bucketCount) {
       // If the range is smaller than the bucket count, create one bucket per data point
-      return data.map(entry => {
-        const { insertions, deletions } = parseStats(entry.stats);
-        return {
-          insertions,
-          deletions,
-          commits: 1,
-          date: entry.date
-        };
-      });
+      return data.map(entry => ({
+        insertions: entry.insertions,
+        deletions: entry.deletions,
+        commits: 1,
+        date: entry.date
+      }));
     }
 
     const bucketSize = (end - start) / bucketCount;
@@ -407,10 +405,9 @@
     data.forEach(entry => {
       const date = entry.date;
       const bucketIndex = Math.min(Math.floor((date - start) / bucketSize), bucketCount - 1);
-      const { insertions, deletions } = parseStats(entry.stats);
 
-      buckets[bucketIndex].insertions += insertions;
-      buckets[bucketIndex].deletions += deletions;
+      buckets[bucketIndex].insertions += entry.insertions;
+      buckets[bucketIndex].deletions += entry.deletions;
       buckets[bucketIndex].commits += 1;
       if (!buckets[bucketIndex].date) {
         buckets[bucketIndex].date = date;

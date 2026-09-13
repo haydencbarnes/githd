@@ -3,10 +3,18 @@ import * as fs from 'fs';
 import * as os from 'os';
 
 import * as vs from 'vscode';
-import { execSync, spawn } from 'child_process';
+import { execFile, spawn } from 'child_process';
+import { LRUCache } from 'lru-cache';
 import { Tracer } from './tracer';
 import { isEmptyHash } from './utils';
-import { GitLineCounts, parseGitPath, parseNameStatus, parseNumStat } from './gitParser';
+import {
+  GitBlameLine,
+  GitLineCounts,
+  parseBlameIncremental,
+  parseGitPath,
+  parseNameStatus,
+  parseNumStat
+} from './gitParser';
 
 const EntrySeparator = '[githd-es]';
 const FormatSeparator = '[githd-fs]';
@@ -126,16 +134,42 @@ interface BlameInfo {
   history?: GitBlameItem['history'];
 }
 
+interface BlameCommitInfo {
+  hash: string;
+  relativeDate: string;
+  body: string;
+  stat: string;
+}
+
+// the source of a blame: the file and either the revision or the (staged / working) contents
+interface BlameSource {
+  file: vs.Uri;
+  ref?: string;
+  useContents: boolean;
+}
+
 function singleLined(value: string): string {
   return value.replace(/\r?\n|\r/g, ' ');
+}
+
+function isCommitHash(ref: string): boolean {
+  return /^[0-9a-f]{7,64}$/i.test(ref);
 }
 
 export class GitService {
   private _gitRepos: GitRepo[] = [];
   private _onDidChangeGitRepositories = new vs.EventEmitter<GitRepo[]>();
   private _onDidChangeCurrentGitRepo = new vs.EventEmitter<GitRepo>();
-  private _gitPath: string;
+  private _gitPath = 'git';
   private _currentRepo: GitRepo | undefined;
+
+  // commit details are immutable for a given hash
+  private _commitDetails = new LRUCache<string, string>({ max: 100 });
+  // the relative date of a commit ages, so the blame commit info is only kept for a short while
+  private _blameCommitInfo = new LRUCache<string, BlameCommitInfo>({ max: 200, ttl: 60 * 1000 });
+  // whole-file blames keyed by file, revision, HEAD and document version (see _getBlameCacheKey)
+  private _fileBlames = new LRUCache<string, Map<number, GitBlameLine>>({ max: 4 });
+  private _pendingFileBlames = new Set<string>();
 
   constructor(context: vs.ExtensionContext) {
     context.subscriptions.push(
@@ -143,18 +177,22 @@ export class GitService {
       this._onDidChangeGitRepositories,
       this._onDidChangeCurrentGitRepo
     );
-    let gitPath: string = vs.workspace.getConfiguration('git').get('path') ?? '';
-    if (gitPath) {
-      try {
-        execSync(gitPath);
-      } catch (err) {
-        // fallback to 'git' without the path
-        gitPath = 'git';
+    this._resolveGitPath(vs.workspace.getConfiguration('git').get<string | string[] | null>('path'));
+  }
+
+  // Uses the git of the 'git.path' setting once it is verified to run, 'git' from the PATH otherwise.
+  private async _resolveGitPath(configured: string | string[] | null | undefined): Promise<void> {
+    const candidates = (Array.isArray(configured) ? configured : [configured]).filter(
+      (candidate): candidate is string => typeof candidate === 'string' && candidate.length > 0
+    );
+    for (const candidate of candidates) {
+      const runs = await new Promise<boolean>(resolve => execFile(candidate, ['--version'], error => resolve(!error)));
+      if (runs) {
+        this._gitPath = candidate;
+        return;
       }
-    } else {
-      gitPath = 'git';
+      Tracer.warning(`git.path '${candidate}' cannot be executed, falling back to 'git'`);
     }
-    this._gitPath = gitPath;
   }
 
   get onDidChangeGitRepositories(): vs.Event<GitRepo[]> {
@@ -258,20 +296,8 @@ export class GitService {
     if (!repo) {
       return 0;
     }
-    let args: string[] = ['rev-list', '--simplify-merges', '--count', branch];
-    if (author) {
-      args.push(`--author=${author}`);
-    }
-    if (startTime) {
-      args.push(`--after=${startTime.toISOString()}`);
-    }
-    if (endTime) {
-      args.push(`--before=${endTime.toISOString()}`);
-    }
-
     // the '--' is to avoid same branch and file names caused error
-    args.push('--');
-
+    const args = ['rev-list', '--count', branch, ...this._getLogFilterArgs(author, startTime, endTime), '--'];
     return parseInt(await this._exec(args, repo.root));
   }
 
@@ -325,12 +351,18 @@ export class GitService {
     } else if (isStash) {
       args.unshift('stash');
     }
+    // the stats need a second git run, let it run concurrently with the file list
+    const statsRequest = !leftRef && !isStash ? this._getCommitStats(repo, rightRef) : undefined;
     const result = await this._exec(args, repo.root, throwOnError);
     const files: GitCommittedFile[] = parseNameStatus(result).map(
       change => new GitCommittedFileImpl(repo, change.newPath, change.oldPath, change.status)
     );
-    const stats: string = !leftRef && !isStash ? await this._updateCommitsStats(repo, rightRef, files) : '';
-    return [stats, files];
+    if (!statsRequest) {
+      return ['', files];
+    }
+    const [total, stats] = await statsRequest;
+    files.forEach(file => (file.stat = stats.get(file.gitRelativeOldPath)));
+    return [total, files];
   }
 
   // returns [gitRelativePath, line counts] for every file changed between the two refs.
@@ -401,12 +433,15 @@ export class GitService {
     if (isStash) {
       return ['stash', 'list', `--format=${EntrySeparator}%gd:${format}`, '--date=local', ...statArgs];
     }
+    // History simplification only takes effect with a path. Without one, --simplify-merges just
+    // forces git to walk the whole history before printing the first commit.
+    const simplifyArgs = file ? ['--simplify-merges'] : [];
     return [
       'log',
       `--skip=${start}`,
       `--max-count=${count}`,
       '--date-order',
-      '--simplify-merges',
+      ...simplifyArgs,
       branch,
       `--format=${EntrySeparator}${format}`,
       '--date=local',
@@ -466,19 +501,44 @@ export class GitService {
       return '';
     }
 
+    const cacheKey = !isStash && isCommitHash(ref) ? `${repo.root}\0${ref}` : undefined;
+    const cached = cacheKey ? this._commitDetails.get(cacheKey) : undefined;
+    if (cached !== undefined) {
+      return cached;
+    }
+
     const format: string = isStash
       ? `Stash:         %H %nAuthor:        %aN <%aE> %nAuthorDate:    %ad %n%n%s %n`
       : 'Commit:        %H %nAuthor:        %aN <%aE> %nAuthorDate:    %ad %nCommit:        %cN <%cE> %nCommitDate:    %cd %n%n%s %n';
-    let details: string = await this._exec(
-      ['show', `--format=${format}`, '--no-patch', '--date=local', ref],
+    // The header, body and stat come from a single run. git terminates the format with a newline
+    // and separates it from the stat with a blank line.
+    const output = await this._exec(
+      [
+        'show',
+        `--format=${format}${FormatSeparator}%b${FormatSeparator}`,
+        '--stat',
+        '--stat-width=120',
+        '--date=local',
+        ref
+      ],
       repo.root
     );
-    const body = (await this._exec(['show', '--format=%b', '--no-patch', ref], repo.root)).trim();
+    const details = this._formatCommitDetails(output);
+    if (cacheKey && output) {
+      this._commitDetails.set(cacheKey, details);
+    }
+    return details;
+  }
+
+  private _formatCommitDetails(output: string): string {
+    const [header = '', rawBody = '', rawStat = ''] = output.split(FormatSeparator);
+    let details = header ? header + '\n' : '';
+    const body = rawBody.trim();
     if (body) {
       details += body + '\r\n\r\n';
     }
     details += '-----------------------------\r\n\r\n';
-    details += await this._exec(['show', '--format=', '--stat', '--stat-width=120', ref], repo.root);
+    details += rawStat.replace(/^\r?\n(\r?\n)?/, '');
     return details;
   }
 
@@ -707,121 +767,173 @@ export class GitService {
       return;
     }
 
-    const filePath = source.file.fsPath;
-    const repo = await this.getGitRepo(filePath);
+    const repo = await this.getGitRepo(source.file.fsPath);
     if (!repo) {
       return;
     }
 
-    const args = ['-c', 'core.quotePath=false', 'blame', '-L', `${line + 1},${line + 1}`, '--incremental', '--root'];
-    let contents: Uint8Array | undefined;
-    if (source.useContents) {
-      const document = await vs.workspace.openTextDocument(file);
-      contents = await vs.workspace.encode(document.getText(), { encoding: document.encoding });
-      if (!(await this._exec(['rev-parse', '--verify', '--quiet', 'HEAD'], repo.root)).trim()) {
-        return { file, line, hash: '0000000000000000000000000000000000000000' };
+    // HEAD is part of the blame cache key: a commit, checkout or reset changes the blame
+    const head = (await this._exec(['rev-parse', '--verify', '--quiet', 'HEAD'], repo.root)).trim();
+    if (source.useContents && !head) {
+      return { file, line, hash: '0000000000000000000000000000000000000000' };
+    }
+    const document = source.useContents ? await vs.workspace.openTextDocument(file) : undefined;
+    const contents = document
+      ? await vs.workspace.encode(document.getText(), { encoding: document.encoding })
+      : undefined;
+
+    const cacheKey = this._getBlameCacheKey(repo, file, source, head, document?.version);
+    const blame = await this._blameLine(repo, source, contents, cacheKey, line);
+    if (!blame) {
+      return;
+    }
+
+    if (isEmptyHash(blame.hash)) {
+      Tracer.verbose(`Blame info skipped. repo ${repo.root} file ${source.file.fsPath}:${line} ${blame.hash}`);
+      return { file, line, hash: blame.hash };
+    }
+
+    // the commit info replaces the full hash with the abbreviated one
+    const commit = await this._getBlameCommitInfo(repo, blame.hash);
+    return { file, line, ...blame, ...commit };
+  }
+
+  // Blames one line, undefined when git reports no (complete) blame for it.
+  private async _blameLine(
+    repo: GitRepo,
+    source: BlameSource,
+    contents: Uint8Array | undefined,
+    cacheKey: string | undefined,
+    line: number
+  ): Promise<BlameInfo | undefined> {
+    const lineBlame = await this._getLineBlame(repo, source, contents, cacheKey, line);
+    const blame = lineBlame ? this._toBlameInfo(repo, lineBlame) : undefined;
+    if (!blame || [blame.hash, blame.subject, blame.author, blame.email, blame.date].some(v => !v)) {
+      Tracer.warning(
+        `Blame info missed. repo ${repo.root} file ${source.file.fsPath}:${line} ${blame?.hash}` +
+          ` author: ${blame?.author}, mail: ${blame?.email}, date: ${blame?.date}, summary: ${blame?.subject}`
+      );
+      return;
+    }
+    return blame;
+  }
+
+  // The key of the whole-file blame cache, undefined when the blamed contents cannot be pinned down:
+  // - staged / working contents: the version of the document they were read from
+  // - a revision: fixed by the revision itself
+  // - the working tree file: the version of its open, saved document
+  private _getBlameCacheKey(
+    repo: GitRepo,
+    file: vs.Uri,
+    source: BlameSource,
+    head: string,
+    version: number | undefined
+  ): string | undefined {
+    if (!source.useContents && !source.ref) {
+      const document = vs.workspace.textDocuments.find(doc => doc.uri.toString() === file.toString());
+      if (!document || document.isDirty) {
+        return undefined;
       }
+      version = document.version;
+    }
+    return `${repo.root}\0${file.toString()}\0${source.ref ?? ''}\0${head}\0${version ?? ''}`;
+  }
+
+  private _getBlameArgs(source: BlameSource, line?: number): string[] {
+    const args = ['-c', 'core.quotePath=false', 'blame', '--incremental', '--root'];
+    if (line !== undefined) {
+      args.push('-L', `${line + 1},${line + 1}`);
+    }
+    if (source.useContents) {
       args.push('--contents', '-');
     } else if (source.ref) {
       args.push(source.ref);
     }
-    args.push('--', filePath);
-    const result = await this._exec(args, repo.root, false, contents);
-    const blame = this._parseBlame(result, repo);
-    const { hash, subject, author, email, date } = blame;
-    if ([hash, subject, author, email, date].some(v => !v)) {
-      Tracer.warning(
-        `Blame info missed. repo ${repo.root} file ${filePath}:${line} ${hash}` +
-          ` author: ${author}, mail: ${email}, date: ${date}, summary: ${subject}`
-      );
-      return;
-    }
-
-    if (isEmptyHash(hash)) {
-      Tracer.verbose(`Blame info skipped. repo ${repo.root} file ${filePath}:${line} ${hash}`);
-      return { file, line, hash };
-    }
-
-    // the commit info replaces the full hash with the abbreviated one
-    const commit = await this._getBlameCommitInfo(repo, hash);
-    return { file, line, ...blame, ...commit };
+    args.push('--', source.file.fsPath);
+    return args;
   }
 
-  // parses the output of 'git blame --incremental' for a single line
-  private _parseBlame(output: string, repo: GitRepo): BlameInfo {
-    let hash = '';
-    let originalLine = -1;
-    let originalFile: vs.Uri | undefined;
-    let subject = '';
-    let author = '';
-    let date = '';
-    let email = '';
-    output.split(/\r?\n/g).forEach((line, index) => {
-      if (index == 0) {
-        const fields = line.split(' ');
-        hash = fields[0];
-        originalLine = Number(fields[1]) - 1;
-      } else {
-        const infoName = line.split(' ')[0];
-        if (infoName === 'filename') {
-          originalFile = vs.Uri.file(path.join(repo.root, parseGitPath(line.substring(infoName.length + 1))));
-          return;
-        }
-        const info = line.substring(infoName.length).trim();
-        if (!info) {
-          return;
-        }
-        switch (infoName) {
-          case 'author':
-            author = info;
-            break;
-          case 'committer-time':
-            date = new Date(parseInt(info) * 1000).toLocaleDateString();
-            break;
-          case 'author-mail':
-            email = info;
-            break;
-          case 'summary':
-            subject = singleLined(info);
-            break;
-          default:
-            break;
-        }
-      }
-    });
+  // Returns the blame of one line: from the whole-file blame when it is cached, otherwise from a
+  // single-line blame while the whole file gets blamed in the background for the next requests.
+  private async _getLineBlame(
+    repo: GitRepo,
+    source: BlameSource,
+    contents: Uint8Array | undefined,
+    cacheKey: string | undefined,
+    line: number
+  ): Promise<GitBlameLine | undefined> {
+    const cached = cacheKey ? this._fileBlames.get(cacheKey) : undefined;
+    if (cached) {
+      return cached.get(line);
+    }
+    const result = await this._exec(this._getBlameArgs(source, line), repo.root, false, contents);
+    if (cacheKey) {
+      this._cacheFileBlame(cacheKey, repo, source, contents);
+    }
+    return parseBlameIncremental(result).get(line);
+  }
 
+  private _cacheFileBlame(cacheKey: string, repo: GitRepo, source: BlameSource, contents: Uint8Array | undefined) {
+    if (this._pendingFileBlames.has(cacheKey)) {
+      return;
+    }
+    this._pendingFileBlames.add(cacheKey);
+    this._exec(this._getBlameArgs(source), repo.root, false, contents)
+      .then(output => {
+        const lines = parseBlameIncremental(output);
+        if (lines.size > 0) {
+          this._fileBlames.set(cacheKey, lines);
+        }
+      })
+      .finally(() => this._pendingFileBlames.delete(cacheKey));
+  }
+
+  private _toBlameInfo(repo: GitRepo, { commit, originalLine, filename }: GitBlameLine): BlameInfo {
     const history =
-      originalFile && Number.isInteger(originalLine) && originalLine >= 0
-        ? { file: originalFile, line: originalLine, ref: hash }
+      filename && originalLine >= 0
+        ? { file: vs.Uri.file(path.join(repo.root, filename)), line: originalLine, ref: commit.hash }
         : undefined;
-    return { hash, subject, author, email, date, history };
+    return {
+      hash: commit.hash,
+      subject: singleLined(commit.summary),
+      author: commit.author,
+      email: commit.email,
+      date: commit.committerTime ? new Date(parseInt(commit.committerTime) * 1000).toLocaleDateString() : '',
+      history
+    };
   }
 
   // get additional info of the commit: abbrev hash, relative date, body, stat
-  private async _getBlameCommitInfo(
-    repo: GitRepo,
-    hash: string
-  ): Promise<{ hash: string; relativeDate: string; body: string; stat: string }> {
+  private async _getBlameCommitInfo(repo: GitRepo, hash: string): Promise<BlameCommitInfo> {
+    const key = `${repo.root}\0${hash}`;
+    const cached = this._blameCommitInfo.get(key);
+    if (cached) {
+      return cached;
+    }
     const addition: string = await this._exec(
       ['show', `--format=%h${FormatSeparator}%cr${FormatSeparator}%b${FormatSeparator}`, '--stat', `${hash}`],
       repo.root
     );
     const items = addition.split(FormatSeparator);
-    return {
+    const info: BlameCommitInfo = {
       hash: items[0] ?? '',
       relativeDate: items[1] ?? '',
       body: items[2]?.trim() ?? '',
       stat: ' ' + items[3]?.trim()
     };
+    if (addition) {
+      this._blameCommitInfo.set(key, info);
+    }
+    return info;
   }
 
-  // commits will be updated with stats
-  private async _updateCommitsStats(repo: GitRepo, ref: string, commits: GitCommittedFile[]): Promise<string> {
+  // returns [total stat, [old file path, file stat]] of the commit
+  private async _getCommitStats(repo: GitRepo, ref: string): Promise<[string, Map<string, string>]> {
     const res: string = await this._exec(
       ['show', '--no-show-signature', '--format=', '--stat', '--stat-width=200', ref],
       repo.root
     );
-    const stats = new Map<string, string>(); // [oldFilePath, stat]
+    const stats = new Map<string, string>();
     let total = '';
     res.split(/\r?\n/g).forEach(line => {
       const items = line.split('|');
@@ -831,9 +943,7 @@ export class GitService {
         total = line;
       }
     });
-
-    commits.forEach(commit => (commit.stat = stats.get(commit.gitRelativeOldPath)));
-    return total;
+    return [total, stats];
   }
 
   async getCommits(repo: GitRepo, branch?: string): Promise<string[]> {
@@ -841,15 +951,20 @@ export class GitService {
       return [];
     }
 
-    const result: string = await this._exec(
-      ['log', '--format=%h', '--simplify-merges', '--date-order', branch, '--'],
-      repo.root
-    );
+    // no --simplify-merges: without a path it has no effect on the output (see _getLogArgs)
+    const result: string = await this._exec(['log', '--format=%h', '--date-order', branch, '--'], repo.root);
     return result.split(/\r?\n/g);
   }
 
   private async _scanFolder(folder: string, includeSubFolders?: boolean): Promise<number> {
-    const children = fs.readdirSync(folder, { withFileTypes: true });
+    let children: fs.Dirent[];
+    try {
+      children = await fs.promises.readdir(folder, { withFileTypes: true });
+    } catch (err) {
+      // unreadable folder (permissions, vanished): nothing to scan there
+      Tracer.verbose(`_scanFolder: cannot read ${folder}: ${err}`);
+      return 0;
+    }
     const promises = children
       .filter(child => child.isDirectory() || child.isFile())
       .map(async child => {
@@ -895,21 +1010,21 @@ export class GitService {
     try {
       const result = await new Promise<string>((resolve, reject) => {
         const childProcess = spawn(cmd, args, { cwd });
-        childProcess.stdout.setEncoding('utf8');
-        childProcess.stderr.setEncoding('utf8');
-        let stdout = '',
-          stderr = '';
-        childProcess.stdout.on('data', chunk => {
-          stdout += chunk;
+        // collect the raw chunks and decode once: repeated string concatenation of a large
+        // output (e.g. a long log) is much slower
+        const stdout: Buffer[] = [];
+        const stderr: Buffer[] = [];
+        childProcess.stdout.on('data', (chunk: Buffer) => {
+          stdout.push(chunk);
         });
-        childProcess.stderr.on('data', chunk => {
-          stderr += chunk;
+        childProcess.stderr.on('data', (chunk: Buffer) => {
+          stderr.push(chunk);
         });
         childProcess.on('error', reject).on('close', code => {
           if (code === 0) {
-            resolve(stdout);
+            resolve(Buffer.concat(stdout).toString('utf8'));
           } else {
-            reject(stderr);
+            reject(Buffer.concat(stderr).toString('utf8'));
           }
         });
         if (input !== undefined) {

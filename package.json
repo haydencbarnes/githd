@@ -31,7 +31,7 @@
         "githd"
     ],
     "activationEvents": [
-        "*"
+        "onStartupFinished"
     ],
     "main": "./dist/extension.js",
     "contributes": {
@@ -978,7 +978,6 @@
         "pretty": "prettier -l \"src/**/*.ts\""
     },
     "devDependencies": {
-        "@types/lodash": "^4.17.25",
         "@types/node": "^22.20.1",
         "@types/vscode": "~1.105.0",
         "@typescript-eslint/eslint-plugin": "^8.70.0",
@@ -992,7 +991,6 @@
         "chart.js": "^4.5.1",
         "chartjs-adapter-date-fns": "^3.0.0",
         "date-fns": "^4.4.0",
-        "lodash": "^4.18.1",
         "lru-cache": "^11.5.2"
     }
 }

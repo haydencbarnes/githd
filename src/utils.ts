@@ -54,3 +54,36 @@ export function debounce<T extends (...args: any[]) => any>(func: T, wait: numbe
     timeout = setTimeout(() => func(...args), wait);
   };
 }
+
+// Runs func at most once per wait milliseconds: immediately when idle, otherwise once the wait
+// is over with the latest arguments, so the last call always takes effect.
+export function throttle<T extends (...args: any[]) => any>(func: T, wait: number): (...args: Parameters<T>) => void {
+  let timeout: NodeJS.Timeout | null = null;
+  let last = 0;
+  let pending: Parameters<T> | null = null;
+  const run = (args: Parameters<T>) => {
+    last = Date.now();
+    func(...args);
+  };
+  return (...args: Parameters<T>) => {
+    const remaining = wait - (Date.now() - last);
+    if (remaining <= 0 && !timeout) {
+      run(args);
+      return;
+    }
+    pending = args;
+    if (!timeout) {
+      timeout = setTimeout(
+        () => {
+          timeout = null;
+          if (pending) {
+            const next = pending;
+            pending = null;
+            run(next);
+          }
+        },
+        Math.max(remaining, 0)
+      );
+    }
+  };
+}

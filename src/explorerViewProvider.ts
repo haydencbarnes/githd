@@ -277,14 +277,21 @@ export class ExplorerViewProvider implements vs.TreeDataProvider<CommittedTreeIt
       context.subscriptions
     );
 
-    vs.window.onDidChangeActiveTextEditor(async (editor: vs.TextEditor | undefined) => {
-      if (this._view.visible && this._treeRoot.length > 0 && editor) {
-        const item = await this.findItemByPath(editor.document.uri);
-        if (item) {
-          this._view.reveal(item);
+    vs.window.onDidChangeActiveTextEditor(
+      async (editor: vs.TextEditor | undefined) => {
+        // only a file or a git revision of one (the diff editors) can be in the tree; looking up
+        // the repo of anything else (output, untitled...) would hit the disk and spawn git for nothing
+        const scheme = editor?.document.uri.scheme;
+        if (this._view.visible && this._treeRoot.length > 0 && editor && (scheme === 'file' || scheme === 'git')) {
+          const item = await this.findItemByPath(editor.document.uri);
+          if (item) {
+            this._view.reveal(item);
+          }
         }
-      }
-    });
+      },
+      null,
+      context.subscriptions
+    );
 
     this._context = this._model.filesViewContext;
     this._withFolder = this._model.configuration.withFolder;

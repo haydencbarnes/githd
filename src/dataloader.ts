@@ -7,13 +7,19 @@ import { Tracer } from './tracer';
 import { LRUCache } from 'lru-cache';
 import { debounce } from './utils';
 
+// The files under .git whose change means the cached data may be outdated: the checked out
+// branch (HEAD), the refs (loose, packed or reftable) and hence the commits and the stashes.
+// Notably the index and the objects, which change on every status or fetch, are left out.
+const gitDataPattern = '{HEAD,packed-refs,refs/**,reftable/**}';
+
 class Cache {
   // cached log entries count
   static readonly logEntriesCount = 1200;
   // current branch
   branch: string = '';
-  // all commits in current branch
-  commits: string[] = [];
+  // all commits in current branch, loaded on first use since it is only needed to navigate between
+  // neighbor commits and walks the whole history
+  commits: Promise<string[]> | undefined;
   // key: history view context, value: GitLogEntry[]
   logEntries = new LRUCache<string, GitLogEntry[]>({ max: 5 });
   // key: history view context, value: total commits count
@@ -39,7 +45,7 @@ class Cache {
 
   clear() {
     this.branch = '';
-    this.commits = [];
+    this.commits = undefined;
     this.logEntries.clear();
     this.counts.clear();
   }
@@ -179,7 +185,7 @@ export class Dataloader {
 
     const key = this._cache.countKey(branch, author, startTime, endTime);
     const count: number | undefined = this._cache.counts.get(key);
-    if (count) {
+    if (count !== undefined) {
       return count;
     }
 
@@ -201,7 +207,7 @@ export class Dataloader {
       return '';
     }
 
-    const commits: string[] = this._useCache(repo.root) ? this._cache.commits : await this._gitService.getCommits(repo);
+    const commits = await this._getCommits(repo);
     const index: number = commits.indexOf(ref);
     return index > 0 ? commits[index - 1] : '';
   }
@@ -211,7 +217,7 @@ export class Dataloader {
       return '';
     }
 
-    const commits: string[] = this._useCache(repo.root) ? this._cache.commits : await this._gitService.getCommits(repo);
+    const commits = await this._getCommits(repo);
     const index: number = commits.indexOf(ref);
     return index >= 0 && index + 1 < commits.length ? commits[index + 1] : '';
   }
@@ -222,9 +228,20 @@ export class Dataloader {
       return [false, false];
     }
 
-    const commits: string[] = this._useCache(repo.root) ? this._cache.commits : await this._gitService.getCommits(repo);
+    const commits = await this._getCommits(repo);
     const index: number = commits.indexOf(ref);
     return [index >= 0 && index + 1 < commits.length, index > 0];
+  }
+
+  // The commits of the current branch, loaded once per cache generation
+  private _getCommits(repo: GitRepo): Promise<string[]> {
+    if (!this._useCache(repo.root)) {
+      return this._gitService.getCurrentBranch(repo).then(branch => this._gitService.getCommits(repo, branch));
+    }
+    if (!this._cache.commits) {
+      this._cache.commits = this._gitService.getCommits(repo, this._cache.branch);
+    }
+    return this._cache.commits;
   }
 
   private _enableCache() {
@@ -240,7 +257,7 @@ export class Dataloader {
     }
 
     this._repo = repo;
-    const watching = new vs.RelativePattern(path.join(repo.root, '.git'), '**');
+    const watching = new vs.RelativePattern(path.join(repo.root, '.git'), gitDataPattern);
     this._fsWatcher = vs.workspace.createFileSystemWatcher(watching);
     this._fsWatcher.onDidChange(uri => this._handleFileUpdate(repo, uri));
     this._fsWatcher.onDidCreate(uri => this._handleFileUpdate(repo, uri));
@@ -270,6 +287,11 @@ export class Dataloader {
   }
 
   private _handleFileUpdate(repo: GitRepo, uri?: vs.Uri) {
+    // git writes a ref through a lock file which is then renamed to the ref, whose own change
+    // event is what matters
+    if (uri?.fsPath.endsWith('.lock')) {
+      return;
+    }
     Tracer.verbose(`Dataloader: _handleFileUpdate: current repo:${repo.root}, uri:${uri?.fsPath}`);
 
     // There will be many related file updates in a short time for a single user git command.
@@ -282,8 +304,7 @@ export class Dataloader {
     Tracer.verbose(`Dataloader: _updateCaches: updating cache for ${repo.root}`);
 
     const branch = (await this._gitService.getCurrentBranch(repo)) ?? '';
-    const [commits, count, logs] = await Promise.all([
-      this._gitService.getCommits(repo, branch),
+    const [count, logs] = await Promise.all([
       this._gitService.getCommitsCount(repo, branch),
       this._gitService.getLogEntries(repo, false, 0, Cache.logEntriesCount, branch)
     ]);
@@ -295,7 +316,7 @@ export class Dataloader {
     }
 
     this._cache.branch = branch;
-    this._cache.commits = commits;
+    this._cache.commits = undefined;
     this._cache.counts.set(this._cache.countKey(branch), count);
     this._cache.logEntries.set(this._cache.logEntryKey(branch), logs);
     this._updating = false;

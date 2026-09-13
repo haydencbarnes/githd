@@ -51,6 +51,10 @@ function getConfiguration(): Configuration {
   };
 }
 
+function hasConfigurationChanged(current: Configuration, updated: Configuration): boolean {
+  return (Object.keys(updated) as (keyof Configuration)[]).some(key => updated[key] !== current[key]);
+}
+
 export class Model {
   private _config: Configuration;
 
@@ -79,19 +83,13 @@ export class Model {
     this._loader.enableCache(this._config.cacheEnabled);
 
     vs.workspace.onDidChangeConfiguration(
-      () => {
+      e => {
+        // this event fires for any setting of any extension
+        if (!e.affectsConfiguration('githd')) {
+          return;
+        }
         let newConfig = getConfiguration();
-        if (
-          newConfig.withFolder !== this._config.withFolder ||
-          newConfig.commitsCount !== this._config.commitsCount ||
-          newConfig.expressMode !== this._config.expressMode ||
-          newConfig.displayExpress !== this._config.displayExpress ||
-          newConfig.blameViewMode !== this._config.blameViewMode ||
-          newConfig.disabledInEditor !== this._config.disabledInEditor ||
-          newConfig.traceLevel !== this._config.traceLevel ||
-          newConfig.cacheEnabled !== this._config.cacheEnabled ||
-          newConfig.dataBucketsCount !== this._config.dataBucketsCount
-        ) {
+        if (hasConfigurationChanged(this._config, newConfig)) {
           Tracer.info(`Model: configuration updated ${JSON.stringify(newConfig)}`);
           this._config = newConfig;
           this._onDidChangeConfiguration.fire(newConfig);
