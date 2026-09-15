@@ -286,6 +286,19 @@ export class GitService {
     return (await this._exec(['rev-parse', '--abbrev-ref', 'HEAD'], repo.root)).trim();
   }
 
+  // Lists the branches the remotes' HEADs point at (e.g. origin/main), which is how a clone records
+  // the default branch of each remote. Empty when no remote HEAD is set, e.g. after `git init`.
+  async getRemoteDefaultBranches(repo: GitRepo | undefined): Promise<string[]> {
+    if (!repo) {
+      return [];
+    }
+    const result = await this._exec(['for-each-ref', '--format=%(symref:short)', 'refs/remotes/*/HEAD'], repo.root);
+    return result
+      .split('\n')
+      .map(line => line.trim())
+      .filter(line => !!line);
+  }
+
   async getCommitsCount(
     repo: GitRepo,
     branch: string,

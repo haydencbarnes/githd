@@ -10,6 +10,10 @@ interface BranchPickItem extends vs.QuickPickItem {
   ref: GitRef;
 }
 
+// Names conventionally used for the main line of development, suggested first in the branch
+// picker when the repository has them. Order determines their order in the picker.
+const MainlineBranchNames = ['main', 'master', 'develop'];
+
 function formatCounts(insertions: number, deletions: number): string {
   return `+${insertions} -${deletions}`;
 }
@@ -26,6 +30,18 @@ function formatLineCountsMarkdown(counts: GitLineCounts): string {
     `<span style="color:var(--vscode-terminal-ansiGreen);">+${counts.insertions}</span> ` +
     `<span style="color:var(--vscode-terminal-ansiRed);">-${counts.deletions}</span>`
   );
+}
+
+// Tooltip showing plain text with the line counts, colored, underneath when they are known.
+function lineCountsTooltip(text: string, counts: GitLineCounts | undefined): vs.MarkdownString {
+  const tooltip = new vs.MarkdownString();
+  // Trusted so the colored spans render; no commands are enabled. The text is escaped by appendText.
+  tooltip.isTrusted = { enabledCommands: [] };
+  tooltip.appendText(text);
+  if (counts) {
+    tooltip.appendMarkdown(`\n\n${formatLineCountsMarkdown(counts)}`);
+  }
+  return tooltip;
 }
 
 class CompareFileItem extends vs.TreeItem {
@@ -59,18 +75,30 @@ class CompareFileItem extends vs.TreeItem {
 
   setLineCounts(counts: GitLineCounts | undefined): void {
     this.description = counts ? this._description + descriptionSeparator + formatLineCounts(counts) : this._description;
-    const tooltip = new vs.MarkdownString();
-    // Trusted so the colored spans render; no commands are enabled. The path is escaped by appendText.
-    tooltip.isTrusted = { enabledCommands: [] };
-    tooltip.appendText(
+    this.tooltip = lineCountsTooltip(
       this.file.gitRelativeOldPath === this.file.gitRelativePath
         ? this.file.gitRelativePath
-        : `${this.file.gitRelativeOldPath} -> ${this.file.gitRelativePath}`
+        : `${this.file.gitRelativeOldPath} -> ${this.file.gitRelativePath}`,
+      counts
     );
-    if (counts) {
-      tooltip.appendMarkdown(`\n\n${formatLineCountsMarkdown(counts)}`);
-    }
-    this.tooltip = tooltip;
+  }
+}
+
+// Row above the file list summing up the comparison: the number of changed files and, once
+// known, the total line counts.
+class CompareSummaryItem extends vs.TreeItem {
+  private readonly _description: string;
+
+  constructor(fileCount: number) {
+    super('Total');
+    this._description = `${fileCount} changed file${fileCount === 1 ? '' : 's'}`;
+    this.iconPath = new vs.ThemeIcon('diff-multiple');
+    this.setLineCounts(undefined);
+  }
+
+  setLineCounts(counts: GitLineCounts | undefined): void {
+    this.description = counts ? this._description + descriptionSeparator + formatLineCounts(counts) : this._description;
+    this.tooltip = lineCountsTooltip(this._description, counts);
   }
 }
 
@@ -82,6 +110,7 @@ export class CompareViewProvider implements vs.TreeDataProvider<vs.TreeItem> {
   private _repo: GitRepo | undefined;
   private _base: GitRef | undefined;
   private _compare: GitRef | undefined;
+  private _summary: CompareSummaryItem | undefined;
   private _files: CompareFileItem[] = [];
   private _request = 0;
 
@@ -129,7 +158,11 @@ export class CompareViewProvider implements vs.TreeDataProvider<vs.TreeItem> {
     repository.tooltip = this._repo?.root ?? 'Select repository';
     repository.iconPath = new vs.ThemeIcon('repo');
     repository.command = { title: 'Select repository', command: 'githd.selectCompareRepository' };
-    return [repository, this._branchItem('base'), this._branchItem('compare'), ...this._files];
+    const items = [repository, this._branchItem('base'), this._branchItem('compare')];
+    if (this._summary) {
+      items.push(this._summary);
+    }
+    return [...items, ...this._files];
   }
 
   private _branchItem(side: 'base' | 'compare'): vs.TreeItem {
@@ -207,7 +240,11 @@ export class CompareViewProvider implements vs.TreeDataProvider<vs.TreeItem> {
   // Shows the branch picker for one side of the comparison. Resolves to undefined when nothing
   // was picked or the repository changed while the branches were loading.
   private async _pickBranch(repo: GitRepo, side: 'base' | 'compare'): Promise<GitRef | undefined> {
-    const refs = await this._getBranches(repo);
+    const [refs, currentBranch, remoteDefaults] = await Promise.all([
+      this._getBranches(repo),
+      this._gitService.getCurrentBranch(repo),
+      this._gitService.getRemoteDefaultBranches(repo)
+    ]);
     if (!this._isCurrentRepo(repo)) {
       return undefined;
     }
@@ -215,21 +252,63 @@ export class CompareViewProvider implements vs.TreeDataProvider<vs.TreeItem> {
       this._view.message = 'No branches available.';
       return undefined;
     }
-    const items: BranchPickItem[] = refs.map(ref => ({
-      label: ref.name!,
-      description: `${ref.type === GitRefType.RemoteHead ? 'Remote' : 'Local'} branch at ${ref.commit}`,
-      ref
-    }));
+    const suggested = this._suggestedBranches(refs, currentBranch, remoteDefaults);
+    const others = refs.filter(ref => !suggested.some(item => item.ref === ref)).map(ref => this._branchPickItem(ref));
+    const items: vs.QuickPickItem[] = [];
+    if (suggested.length) {
+      items.push({ label: 'Suggested', kind: vs.QuickPickItemKind.Separator }, ...suggested);
+      if (others.length) {
+        items.push({ label: 'Other branches', kind: vs.QuickPickItemKind.Separator });
+      }
+    }
+    items.push(...others);
     const selected = await vs.window.showQuickPick(items, {
       title: side === 'base' ? 'Compare: Base Branch (Left)' : 'Compare: Branch (Right)',
       matchOnDescription: true
     });
-    return selected?.ref;
+    // Separators cannot be picked, so whatever was selected is a branch item.
+    return (selected as BranchPickItem | undefined)?.ref;
+  }
+
+  private _branchPickItem(ref: GitRef, kind = ref.type === GitRefType.RemoteHead ? 'Remote' : 'Local'): BranchPickItem {
+    return { label: ref.name!, description: `${kind} branch at ${ref.commit}`, ref };
+  }
+
+  // Branches worth reaching quickly: the checked out branch first, then the remotes' default
+  // branches and the conventional main-line names. Each of those prefers the local branch and
+  // falls back to its copy on origin, then on any other remote. Empty on a detached HEAD in a
+  // repository without any main-line branch.
+  private _suggestedBranches(
+    refs: GitRef[],
+    currentBranch: string | undefined,
+    remoteDefaults: string[]
+  ): BranchPickItem[] {
+    const items: BranchPickItem[] = [];
+    const add = (ref: GitRef | undefined, kind?: string) => {
+      if (ref && !items.some(item => item.ref === ref)) {
+        items.push(this._branchPickItem(ref, kind));
+      }
+    };
+    add(
+      refs.find(ref => ref.type === GitRefType.Head && ref.name === currentBranch),
+      'Current'
+    );
+    const defaultNames = remoteDefaults.map(name => name.slice(name.indexOf('/') + 1));
+    for (const name of [...defaultNames, ...MainlineBranchNames]) {
+      add(
+        refs.find(ref => ref.type === GitRefType.Head && ref.name === name) ??
+          refs.find(ref => ref.type === GitRefType.RemoteHead && ref.name === `origin/${name}`) ??
+          refs.find(ref => ref.type === GitRefType.RemoteHead && ref.name!.endsWith(`/${name}`)),
+        defaultNames.includes(name) ? 'Default' : undefined
+      );
+    }
+    return items;
   }
 
   private async _refresh(): Promise<void> {
     const request = ++this._request;
     const repo = this._repo;
+    this._summary = undefined;
     this._files = [];
     this._view.description = undefined;
     this._view.message = repo ? 'Loading branches...' : 'No Git repository selected.';
@@ -277,6 +356,7 @@ export class CompareViewProvider implements vs.TreeDataProvider<vs.TreeItem> {
     this._files = files
       .sort((left, right) => left.gitRelativePath.localeCompare(right.gitRelativePath))
       .map(file => new CompareFileItem(file, repo, base, compare));
+    this._summary = files.length ? new CompareSummaryItem(files.length) : undefined;
     this._view.description = `${files.length} changed file${files.length === 1 ? '' : 's'}`;
     this._view.message = files.length ? undefined : 'No differences between these branches.';
     this._onDidChange.fire(undefined);
@@ -287,18 +367,19 @@ export class CompareViewProvider implements vs.TreeDataProvider<vs.TreeItem> {
     }
   }
 
-  // Fills in the per-file line counts and appends their totals to the view description.
+  // Fills in the per-file line counts and appends their totals to the summary row and the view
+  // description.
   private _applyLineCounts(lineCounts: Map<string, GitLineCounts>): void {
     if (!lineCounts.size) {
       return;
     }
-    let insertions = 0;
-    let deletions = 0;
+    const total: GitLineCounts = { insertions: 0, deletions: 0, binary: false };
     lineCounts.forEach(counts => {
-      insertions += counts.insertions;
-      deletions += counts.deletions;
+      total.insertions += counts.insertions;
+      total.deletions += counts.deletions;
     });
     this._files.forEach(item => item.setLineCounts(lineCounts.get(item.file.gitRelativePath)));
-    this._view.description += descriptionSeparator + formatCounts(insertions, deletions);
+    this._summary?.setLineCounts(total);
+    this._view.description += descriptionSeparator + formatLineCounts(total);
   }
 }
