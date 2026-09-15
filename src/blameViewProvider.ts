@@ -4,9 +4,15 @@ import { Model } from './model';
 import { GitService, GitBlameItem } from './gitService';
 import { Tracer } from './tracer';
 import { debounce, getPullRequests, isEmptyHash } from './utils';
+import { GitRevisionScheme } from './gitUri';
 
 const NotCommitted = `Not committed yet`;
-const BlameDocumentSelector: vs.DocumentSelector = [{ scheme: 'file' }, { scheme: 'git' }];
+// the files and their revisions shown by the diff editors of githd and of the git extension
+const BlameDocumentSelector: vs.DocumentSelector = [
+  { scheme: 'file' },
+  { scheme: GitRevisionScheme },
+  { scheme: 'git' }
+];
 
 class BlameViewStatProvider implements vs.Disposable, vs.HoverProvider {
   private _disposables: vs.Disposable[] = [];

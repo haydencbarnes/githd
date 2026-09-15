@@ -10,6 +10,10 @@ import { Tracer } from './tracer';
 import { ExplorerViewProvider } from './explorerViewProvider';
 import { Dataloader } from './dataloader';
 import { PanelViewProvider } from './panelViewProvider';
+import { toGitRevisionUri } from './gitUri';
+
+// the side of a diff editor of a file which does not exist at that revision (added or deleted)
+const emptyFileUri = vs.Uri.parse('githd-empty:');
 
 function activeFile(): vs.Uri | undefined {
   return vs.window.activeTextEditor?.document.uri;
@@ -21,17 +25,6 @@ function activeLine(): number | undefined {
 
 function isValidLine(line?: number): line is number {
   return line !== undefined && Number.isInteger(line) && line >= 0;
-}
-
-function toGitUri(uri: vs.Uri, ref?: string): vs.Uri {
-  return uri.with({
-    scheme: 'git',
-    path: uri.path,
-    query: JSON.stringify({
-      path: uri.fsPath,
-      ref
-    })
-  });
 }
 
 async function selectBranch(
@@ -385,16 +378,21 @@ export class CommandCenter {
     comparisonTitle?: string
   ): void {
     Tracer.verbose('Command: githd.openCommittedFile');
-    let rightRef = context?.rightRef;
+    const rightRef = context?.rightRef;
+    if (!context || !rightRef) {
+      Tracer.warning('openCommittedFile: no commit to open the file at');
+      return;
+    }
     let leftRef: string = rightRef + '~';
     let title = comparisonTitle ?? rightRef;
-    if (context?.leftRef) {
+    if (context.leftRef) {
       leftRef = context.leftRef;
       title = comparisonTitle ?? `${leftRef} .. ${rightRef}`;
     }
     title += ' | ' + path.basename(file.gitRelativePath);
-    let left = file.status == 'A' ? vs.Uri.parse('githd-empty:') : toGitUri(file.oldFileUri, leftRef);
-    let right = file.status == 'D' ? vs.Uri.parse('githd-empty:') : toGitUri(file.fileUri, rightRef);
+    const root = context.repo.root;
+    let left = file.status == 'A' ? emptyFileUri : toGitRevisionUri(root, file.gitRelativeOldPath, leftRef);
+    let right = file.status == 'D' ? emptyFileUri : toGitRevisionUri(root, file.gitRelativePath, rightRef);
     vs.commands.executeCommand<void>('vscode.diff', left, right, title, { preview: true });
   }
 
@@ -422,14 +420,17 @@ export class CommandCenter {
   }
 
   @command('githd.diffUncommittedFile')
-  async diffUncommittedFile(file = vs.window.activeTextEditor?.document?.uri): Promise<void> {
+  async diffUncommittedFile(document = activeFile()): Promise<void> {
+    // the command may be run from a diff editor showing a revision of the file
+    const file = document && this._gitService.getFileRevision(document)?.file;
     if (!file) {
       return;
     }
     Tracer.verbose('Command: githd.diffUncommittedFile');
 
     const repo = await this._gitService.getGitRepo(file.fsPath);
-    if (!repo) {
+    const relativePath = await this._gitService.getGitRelativePath(file);
+    if (!repo || !relativePath) {
       return;
     }
     vs.window
@@ -440,7 +441,7 @@ export class CommandCenter {
         if (item) {
           return await vs.commands.executeCommand<void>(
             'vscode.diff',
-            toGitUri(file, item.label),
+            toGitRevisionUri(repo.root, relativePath, item.label),
             file,
             `${item.label} .. Uncommitted (${path.basename(file.path)})`,
             { preview: true }
@@ -484,9 +485,11 @@ export class CommandCenter {
 
   private async _diffPath(specifiedPath: vs.Uri, ref?: string): Promise<void> {
     if (specifiedPath) {
-      const repo = await this._gitService.getGitRepo(specifiedPath.fsPath);
+      // the command may be run from a diff editor showing a revision of the file
+      const file = this._gitService.getFileRevision(specifiedPath)?.file ?? specifiedPath;
+      const repo = await this._gitService.getGitRepo(file.fsPath);
       if (repo) {
-        this._diffSelections(repo, specifiedPath, ref);
+        this._diffSelections(repo, file, ref);
       }
     }
   }

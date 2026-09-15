@@ -10,11 +10,13 @@ import { InfoViewProvider } from './infoViewProvider';
 import { BlameViewProvider } from './blameViewProvider';
 import { Dataloader } from './dataloader';
 import { PanelViewProvider } from './panelViewProvider';
+import { GitFileSystemProvider } from './gitFileSystemProvider';
 import { initializeIcons } from './icons';
 
 export function activate(context: vs.ExtensionContext) {
   initializeIcons(context);
   let gitService = new GitService(context);
+  new GitFileSystemProvider(context, gitService);
   let dataloader = new Dataloader(context, gitService);
   let model = new Model(context, dataloader);
   let panelView = new PanelViewProvider(context, model);

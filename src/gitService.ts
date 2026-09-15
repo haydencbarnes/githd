@@ -10,11 +10,16 @@ import { isEmptyHash } from './utils';
 import {
   GitBlameLine,
   GitLineCounts,
+  GitObjectDetails,
+  GitTreeEntry,
   parseBlameIncremental,
   parseGitPath,
+  parseLsTree,
   parseNameStatus,
-  parseNumStat
+  parseNumStat,
+  parseObjectDetails
 } from './gitParser';
+import { fromGitRevisionUri } from './gitUri';
 
 const EntrySeparator = '[githd-es]';
 const FormatSeparator = '[githd-fs]';
@@ -572,9 +577,37 @@ export class GitService {
     });
   }
 
+  // Describes the object at the path of a revision, undefined when there is none. The path is
+  // relative to the repository root, '' for the root itself.
+  async getObjectDetails(repo: GitRepo, ref: string, relativePath: string): Promise<GitObjectDetails | undefined> {
+    const output = await this._exec(['cat-file', '--batch-check'], repo.root, false, `${ref}:${relativePath}\n`);
+    return parseObjectDetails(output);
+  }
+
+  // Lists the entries of the folder at the path of a revision, empty when there is no such folder.
+  async listTree(repo: GitRepo, ref: string, relativePath: string): Promise<GitTreeEntry[]> {
+    return parseLsTree(await this._exec(['ls-tree', '-z', '-l', `${ref}:${relativePath}`], repo.root));
+  }
+
+  // The content of the file at the path of a revision (with the textconv filters applied, like the
+  // git extension does). Rejects when there is no such file.
+  readFileAtRevision(repo: GitRepo, ref: string, relativePath: string): Promise<Uint8Array> {
+    return this._execBuffer(['show', '--textconv', `${ref}:${relativePath}`], repo.root);
+  }
+
+  // Resolves an editor document to the file on disk it shows and, when it shows a revision (the
+  // diff editors of githd or of the git extension), to the revision.
   getFileRevision(file: vs.Uri): { file: vs.Uri; ref?: string; useContents: boolean; stage?: number } | undefined {
     if (file.scheme === 'file') {
       return { file, useContents: false };
+    }
+    const revision = fromGitRevisionUri(file);
+    if (revision) {
+      return {
+        file: vs.Uri.file(path.join(revision.root, revision.relativePath)),
+        ref: revision.ref,
+        useContents: false
+      };
     }
     if (file.scheme !== 'git') {
       return;
@@ -1017,11 +1050,23 @@ export class GitService {
   }
 
   private async _exec(args: string[], cwd: string, throwOnError = false, input?: string | Uint8Array): Promise<string> {
+    try {
+      return (await this._execBuffer(args, cwd, input)).toString('utf8');
+    } catch (err) {
+      if (throwOnError) {
+        throw err;
+      }
+      return '';
+    }
+  }
+
+  // Runs git and resolves to its raw output, rejecting with its error output when it fails.
+  private async _execBuffer(args: string[], cwd: string, input?: string | Uint8Array): Promise<Buffer> {
     const start = Date.now();
     const cmd = this._gitPath;
 
     try {
-      const result = await new Promise<string>((resolve, reject) => {
+      const result = await new Promise<Buffer>((resolve, reject) => {
         const childProcess = spawn(cmd, args, { cwd });
         // collect the raw chunks and decode once: repeated string concatenation of a large
         // output (e.g. a long log) is much slower
@@ -1035,7 +1080,7 @@ export class GitService {
         });
         childProcess.on('error', reject).on('close', code => {
           if (code === 0) {
-            resolve(Buffer.concat(stdout).toString('utf8'));
+            resolve(Buffer.concat(stdout));
           } else {
             reject(Buffer.concat(stderr).toString('utf8'));
           }
@@ -1052,10 +1097,7 @@ export class GitService {
       return result;
     } catch (err) {
       Tracer.error(`git command failed: ${cmd} ${args.join(' ')} (${Date.now() - start}ms) ${cwd} ${err}`);
-      if (throwOnError) {
-        throw err;
-      }
-      return '';
+      throw err;
     }
   }
 }

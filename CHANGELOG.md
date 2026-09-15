@@ -5,6 +5,7 @@
 - Add a Compare sidebar view with repository selection, local and remote branch pickers, swap and refresh actions, and per-file diffs without checking out branches.
 - Keep branch comparisons independent of the Committed Files selection and open diffs at the compared commit snapshots.
 - Hide Committed Files until a commit, stash, or comparison is selected, and hide it again when cleared.
+- Serve the revisions shown by the diff editors from the extension, so their breadcrumbs list the folders of the repository at that revision and can browse them. Add an Open File action to the title of these editors.
 - Keep the Commits legend swatch gray and add a blue Visible history range key to the stats chart.
 - Upgrade TypeScript to 6.0, ESLint to 10, Chart.js to 4, and update the remaining dependencies. Modernize lint configuration and bundle the chart with its date-fns adapter.
 - Require VS Code 1.105+ or a compatible Cursor release. Target Node.js 22 for the extension runtime; development requires Node.js 22.13+ on the 22.x release line, or Node.js 24+.

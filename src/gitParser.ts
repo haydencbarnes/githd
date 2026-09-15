@@ -165,6 +165,47 @@ function parseBlameDetail(group: BlameGroup, line: string): void {
   }
 }
 
+// The kind of an object of a tree: a blob is a file, a tree a folder and a commit a submodule.
+export type GitObjectType = 'blob' | 'tree' | 'commit';
+
+export interface GitObjectDetails {
+  type: GitObjectType;
+  size: number;
+}
+
+export interface GitTreeEntry extends GitObjectDetails {
+  // e.g. 100644 for a file, 120000 for a symbolic link, 040000 for a folder
+  mode: string;
+  name: string;
+}
+
+const objectTypes = new Set<string>(['blob', 'tree', 'commit']);
+
+// Parses the answer of `git cat-file --batch-check` to a single object: `oid type size`, or
+// `object missing` (also `ambiguous`) which yields undefined.
+export function parseObjectDetails(output: string): GitObjectDetails | undefined {
+  const match = /^[0-9a-f]+ (\w+) (\d+)$/m.exec(output);
+  if (!match || !objectTypes.has(match[1])) {
+    return;
+  }
+  return { type: match[1] as GitObjectType, size: Number(match[2]) };
+}
+
+// Parses `git ls-tree -z -l` output: `mode type oid size\tname\0` per entry, the size being
+// right-justified and '-' for trees and submodules.
+export function parseLsTree(output: string): GitTreeEntry[] {
+  const entries: GitTreeEntry[] = [];
+  for (const token of output.split('\0')) {
+    const match = /^(\d+) (\w+) [0-9a-f]+ +(\d+|-)\t(.+)$/s.exec(token);
+    if (!match || !objectTypes.has(match[2])) {
+      continue;
+    }
+    const [, mode, type, size, name] = match;
+    entries.push({ mode, type: type as GitObjectType, size: size === '-' ? 0 : Number(size), name });
+  }
+  return entries;
+}
+
 // Parses `git diff --numstat -z` output into [new path, line counts]:
 //   insertions\tdeletions\tpath\0
 //   insertions\tdeletions\t\0old_path\0new_path\0    for renames and copies

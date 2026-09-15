@@ -244,19 +244,8 @@ export class ExplorerViewProvider implements vs.TreeDataProvider<CommittedTreeIt
       vs.commands.registerCommand('githd.diffCommitFromTreeView', (folder: FolderItem) =>
         vs.commands.executeCommand('githd.diffFolderFromTreeView', folder)
       ),
-      vs.commands.registerCommand('githd.openFile', (fileItem: CommittedFileItem) => {
-        const editor: vs.TextEditor | undefined = vs.window.activeTextEditor;
-        vs.commands.executeCommand('vscode.open', fileItem.file.fileUri).then(() => {
-          if (
-            editor?.document.uri.fsPath === fileItem.file.fileUri.fsPath &&
-            vs.window.activeTextEditor?.document.uri.fsPath === fileItem.file.fileUri.fsPath
-          ) {
-            vs.window.activeTextEditor.revealRange(editor.visibleRanges[0], vs.TextEditorRevealType.InCenter);
-            vs.window.activeTextEditor.selection = editor.selection;
-            vs.window.activeTextEditor.selections = editor.selections;
-          }
-        });
-      }),
+      // run from the tree or, given the document uri, from the title of an editor showing a revision
+      vs.commands.registerCommand('githd.openFile', (item?: CommittedFileItem | vs.Uri) => this._openFile(item)),
       vs.commands.registerCommand('githd.showFileStats', (folder: FolderItem) => this._setFileWithStats(folder, true)),
       vs.commands.registerCommand('githd.hideFileStats', (folder: FolderItem) => this._setFileWithStats(folder, false)),
       vs.commands.registerCommand('githd.copyCommitHash', () =>
@@ -281,9 +270,9 @@ export class ExplorerViewProvider implements vs.TreeDataProvider<CommittedTreeIt
       async (editor: vs.TextEditor | undefined) => {
         // only a file or a git revision of one (the diff editors) can be in the tree; looking up
         // the repo of anything else (output, untitled...) would hit the disk and spawn git for nothing
-        const scheme = editor?.document.uri.scheme;
-        if (this._view.visible && this._treeRoot.length > 0 && editor && (scheme === 'file' || scheme === 'git')) {
-          const item = await this.findItemByPath(editor.document.uri);
+        const file = editor && this._gitService.getFileRevision(editor.document.uri)?.file;
+        if (this._view.visible && this._treeRoot.length > 0 && file) {
+          const item = await this.findItemByPath(file);
           if (item) {
             this._view.reveal(item);
           }
@@ -376,6 +365,27 @@ export class ExplorerViewProvider implements vs.TreeDataProvider<CommittedTreeIt
 
   async refresh(): Promise<void> {
     await this._update();
+  }
+
+  // Opens the file of the working tree and, when the active editor shows a revision of it, keeps
+  // the visible range and the selection. Without an item (e.g. a keybinding) the active editor's
+  // file is opened.
+  private _openFile(item: CommittedFileItem | vs.Uri | undefined): void {
+    const editor = vs.window.activeTextEditor;
+    const target = item ?? editor?.document.uri;
+    const file = target instanceof vs.Uri ? this._gitService.getFileRevision(target)?.file : target?.file.fileUri;
+    if (!file) {
+      return;
+    }
+    const shown = editor && this._gitService.getFileRevision(editor.document.uri)?.file;
+    vs.commands.executeCommand('vscode.open', file).then(() => {
+      const opened = vs.window.activeTextEditor;
+      if (editor && shown?.fsPath === file.fsPath && opened?.document.uri.fsPath === file.fsPath) {
+        opened.revealRange(editor.visibleRanges[0], vs.TextEditorRevealType.InCenter);
+        opened.selection = editor.selection;
+        opened.selections = editor.selections;
+      }
+    });
   }
 
   private get commitOrStashString(): string {

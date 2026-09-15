@@ -31,7 +31,8 @@
         "githd"
     ],
     "activationEvents": [
-        "onStartupFinished"
+        "onStartupFinished",
+        "onFileSystem:githd-git"
     ],
     "main": "./dist/extension.js",
     "contributes": {
@@ -811,6 +812,11 @@
             ],
             "editor/title": [
                 {
+                    "command": "githd.openFile",
+                    "when": "resourceScheme == githd-git",
+                    "group": "navigation@0"
+                },
+                {
                     "command": "githd.viewHistory",
                     "when": "githd.hasGitRepo && !githd.disableInEditor",
                     "group": "navigation@1"
@@ -837,6 +843,16 @@
                 }
             ]
         },
+        "resourceLabelFormatters": [
+            {
+                "scheme": "githd-git",
+                "formatting": {
+                    "label": "${path} (${query.ref})",
+                    "separator": "/",
+                    "stripPathStartingSeparator": true
+                }
+            }
+        ],
         "colors": [
             {
                 "id": "githd.historyView.title",
